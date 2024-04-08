@@ -25,3 +25,7 @@ coverage: $(VENV)/bin/coverage
 		-m unittest -c $(TESTS)
 	$(in_venv) $(PYTHON) -m coverage report
 	$(in_venv) $(PYTHON) -m coverage html
+
+.PHONY: format
+format: $(VENV)/bin/coverage
+	$(in_venv) black src tests
