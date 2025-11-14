@@ -181,6 +181,12 @@ Example for covers80:
 
 See comments at the top of the make_embeds script for more details. The output of `make_embeds` is `reference_embeddings.pkl`.
 
+### Centroids Option
+
+The embeddings generated above represent all of the individual _performances_ you provided to the `make_embeds` script. What if you are instead interested in simplifying that galaxy of performances as the galaxy of _works_ instead, where one embedding represents the average location of all the performances assigned to that work? Then use the `compute_centroids.py` utility as a next step. Example for covers80:
+
+`python -m tools.compute_centroids data/covers80/reference_embeddings.pkl data/covers80/work_centroids.pkl`
+
 ## Inference (work identification)
 
 Now that you have reference embeddings and the trained model to generate new embeddings for any new audio, you can use the `identify` script to identify any music you give it. See the high-level explanation of how this works in the "Generate reference embeddings" section above. See comments at the top of tools.identify for documentation of the parameters.
@@ -196,6 +202,14 @@ Optional parameter to save the embedding as a NumPy array:
 `python -m tools.identify data/covers80 training/covers80 query.wav -save query.npy`
 
 Future goal and call for help: How do we take this command-line solution for inference and productionize it for broader use outside the context of the specific machine where this CoverHunterMPS project was installed?
+
+### Centroids Option
+
+If you chose to generate work embeddings using `compute_centroids`, you can optionally have the `identify` script return matching works instead of matching performances. Use the `-centroids` flag like this:
+
+`python -m tools.identify data/covers80 training/covers80 query.wav -top=10 -centroids`
+
+See the comments just before the `if radii and args.centroids:` line of the script to also consider whether or not to use the confidence-radius filtering option, and then tune the `min_threshold` and `padding` constants for your model based on running query experiments to get your desired inference results.
 
 ## Adding New Works to a Model's Knowledge
 
