@@ -11,6 +11,10 @@ Assumptions:
 Example invocation:
 python -m tools.identify data/covers80 training/covers80 query.wav -top=10
 
+Or after using the optional tools.make_centroids utility:
+    
+python -m tools.identify data/covers80 training/covers80 query.wav -centroids
+
 Parameters
 ----------
 data_path : string
@@ -166,6 +170,8 @@ def _main():
     parser.add_argument("query_path")
     parser.add_argument("-top", default=10, type=int)
     parser.add_argument("-save", help="Path to save the query embedding as .npy file")
+    parser.add_argument("-centroids", action="store_true", 
+                        help="Use work_centroids.pkl instead of reference_embeddings.pkl")  # ADD THIS
     args = parser.parse_args()
     data_dir = args.data_path
     model_dir = args.model_path
@@ -225,9 +231,16 @@ def _main():
         np.save(args.save, query_embed)
         print(f"Query embedding saved to: {args.save}")
 
-    # Load reference embeddings from pickle file
-    with open(os.path.join(data_dir, "reference_embeddings.pkl"), "rb") as f:
-        ref_embeds = pickle.load(f)
+    # Load reference embeddings or centroids from pickle file
+    if args.centroids:
+        with open(os.path.join(data_dir, "work_centroids.pkl"), "rb") as f:
+            centroid_data = pickle.load(f)
+            ref_embeds = centroid_data['centroids']
+            radii = centroid_data.get('radii', {})  # Optional radii
+    else:
+        with open(os.path.join(data_dir, "reference_embeddings.pkl"), "rb") as f:
+            ref_embeds = pickle.load(f)
+            radii = {}
 
     # Calculate cosine similarity between query embedding and reference embeddings
     cos_dists = {
@@ -235,8 +248,30 @@ def _main():
         for label, ref_embed in ref_embeds.items()
     }
 
+    # Optional: Filter out matches beyond confidence radius (with floor)
+    # Comment out this section if you want unfiltered results when using -centroids
+    if radii and args.centroids:
+        min_threshold = 0.05  # Tune this radius floor for your model
+            # Necessary because single-performance works will have radius=0
+        padding = .05 # Tune this "open-mindedness" percentage for your model
+            # example: .05 = include candidate works within 5% farther than
+            # than the confidence radius associated with that particular work centroid
+        cos_dists = {
+            label: dist for label, dist in cos_dists.items()
+            if dist <= max(radii.get(label, min_threshold) * (1 + padding), min_threshold)
+        }
+    
+    # Handle case where filtering removed all matches
+    if not cos_dists:
+        print("\nNo matches found within confidence radius thresholds.")
+        print(f"Tried radius floor: {min_threshold}, padding: {padding}")
+        return [], []
+
     # Get the top N closest reference embeddings
     top_n = nsmallest(top, cos_dists.items(), key=lambda x: x[1])
+    if not top_n:  # Handle empty results
+        return [], []
+
     top_n_labels, top_n_distances = zip(*top_n)
 
     return top_n_labels, top_n_distances
