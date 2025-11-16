@@ -18,7 +18,7 @@ torch.backends.cudnn.benchmark = True
 
 def _main() -> None:
     parser = argparse.ArgumentParser(
-        description="evaluate test-set with pretrained model",
+        description="Evaluate a pretrained model against a test dataset",
     )
     parser.add_argument("model_dir")
     parser.add_argument("query_path")

@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 Compare two dataset.txt files and generate query_in_ref describing which perf
-ids in one are also present in the other. 
+ids in one are also present in the other.
 Generate query_in_ref file as used by eval_testset.py
 
-Usage from repo root: 
+Usage from repo root:
     Set query and ref locations at top of script
     python tools/make_query_in_ref.py
 
@@ -18,6 +18,7 @@ query_file = "../CHmodels/reels80.6-6/Reel80_6-6.txt"
 
 import json
 import argparse
+
 
 def process_files(query_path, ref_path):
     """
@@ -59,9 +60,10 @@ def process_files(query_path, ref_path):
 
 
 parser = argparse.ArgumentParser(
-  description="generate query_in_ref mapping of perfs appearing in both datasets")
-parser.add_argument('query_path')
-parser.add_argument('ref_path')
+    description="generate query_in_ref mapping of perfs appearing in both datasets"
+)
+parser.add_argument("query_path")
+parser.add_argument("ref_path")
 args = parser.parse_args()
 query_path = args.query_path
 ref_path = args.ref_path

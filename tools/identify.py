@@ -12,7 +12,7 @@ Example invocation:
 python -m tools.identify data/covers80 training/covers80 query.wav -top=10
 
 Or after using the optional tools.make_centroids utility:
-    
+
 python -m tools.identify data/covers80 training/covers80 query.wav -centroids
 
 Parameters
@@ -22,24 +22,24 @@ data_path : string
         1) hparams.yaml file as documented for use with
         tools.extract_csi_features. These hyperparameters are necessary to
         generate a CQT spectrogram for your query that uses the same CQT
-        parameters as were used for the audio during training of the model. 
+        parameters as were used for the audio during training of the model.
         Most important is that n_bins must match.
         2) The reference_embeddings.pkl file that you generated using
         tools.make_embeds.
 
 model_path : string
-    The relative path that must contain: 
+    The relative path that must contain:
         1) a subfolder "checkpoints" containing checkpoint files
         2) The model's hyperparameters as hparams.yaml
 
 query_path : string
-    Relative path to the query audio. 
+    Relative path to the query audio.
 
 top : integer
     Optional. Return N closest matches to this query where N = top.
 
 save : string
-    Relative path to use for saving the embedding of the query audio. 
+    Relative path to use for saving the embedding of the query audio.
 
 Created on Sat Mar  2 17:31:23 2024
 @author: alanngnet
@@ -91,7 +91,7 @@ def _make_feat(wav_path, fmin, max_freq, n_bins, bins_per_octave, device):
 
     # Load audio using librosa and force sample rate of 16kHz
     signal, sr = librosa.load(wav_path, sr=16000, mono=True)
-    
+
     # Convert to torch tensor and move to device
     signal = torch.from_numpy(signal).float().unsqueeze(0).to(device)
 
@@ -169,9 +169,14 @@ def _main():
     parser.add_argument("model_path")
     parser.add_argument("query_path")
     parser.add_argument("-top", default=10, type=int)
-    parser.add_argument("-save", help="Path to save the query embedding as .npy file")
-    parser.add_argument("-centroids", action="store_true", 
-                        help="Use work_centroids.pkl instead of reference_embeddings.pkl")  # ADD THIS
+    parser.add_argument(
+        "-save", help="Path to save the query embedding as .npy file"
+    )
+    parser.add_argument(
+        "-centroids",
+        action="store_true",
+        help="Use work_centroids.pkl instead of reference_embeddings.pkl",
+    )  # ADD THIS
     args = parser.parse_args()
     data_dir = args.data_path
     model_dir = args.model_path
@@ -226,7 +231,7 @@ def _main():
         query_embed, _ = model.inference(query_feat)
     query_embed = query_embed.cpu().numpy()[0]
 
-    # Save embedding if requested 
+    # Save embedding if requested
     if args.save:
         np.save(args.save, query_embed)
         print(f"Query embedding saved to: {args.save}")
@@ -235,10 +240,12 @@ def _main():
     if args.centroids:
         with open(os.path.join(data_dir, "work_centroids.pkl"), "rb") as f:
             centroid_data = pickle.load(f)
-            ref_embeds = centroid_data['centroids']
-            radii = centroid_data.get('radii', {})  # Optional radii
+            ref_embeds = centroid_data["centroids"]
+            radii = centroid_data.get("radii", {})  # Optional radii
     else:
-        with open(os.path.join(data_dir, "reference_embeddings.pkl"), "rb") as f:
+        with open(
+            os.path.join(data_dir, "reference_embeddings.pkl"), "rb"
+        ) as f:
             ref_embeds = pickle.load(f)
             radii = {}
 
@@ -252,15 +259,19 @@ def _main():
     # Comment out this section if you want unfiltered results when using -centroids
     if radii and args.centroids:
         min_threshold = 0.05  # Tune this radius floor for your model
-            # Necessary because single-performance works will have radius=0
-        padding = .05 # Tune this "open-mindedness" percentage for your model
-            # example: .05 = include candidate works within 5% farther than
-            # than the confidence radius associated with that particular work centroid
+        # Necessary because single-performance works will have radius=0
+        padding = 0.05  # Tune this "open-mindedness" percentage for your model
+        # example: .05 = include candidate works within 5% farther than
+        # than the confidence radius associated with that particular work centroid
         cos_dists = {
-            label: dist for label, dist in cos_dists.items()
-            if dist <= max(radii.get(label, min_threshold) * (1 + padding), min_threshold)
+            label: dist
+            for label, dist in cos_dists.items()
+            if dist
+            <= max(
+                radii.get(label, min_threshold) * (1 + padding), min_threshold
+            )
         }
-    
+
     # Handle case where filtering removed all matches
     if not cos_dists:
         print("\nNo matches found within confidence radius thresholds.")
