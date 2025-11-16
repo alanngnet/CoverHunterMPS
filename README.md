@@ -137,8 +137,21 @@ See the "Training checkpoint output" section below for a description of the embe
 
 ### Arguments
 
+#### model_dir
+Path to a folder that contains: 
+- A subfolder `config` containing a file `hparams.yaml` that specifies the CoverHunterMPS parameters used during training your model. This would be the same as your `/training/mymodel/config/hparams.yaml` file in your model-training project.
+- A subfolder `checkpoints` that contains the `g_00000NNN` file from your best training epoch (epoch NNN). If there are multiple such checkpoint files in this subfolder, the highest-numbered one will be used.
+
+#### query_path
+Path to the `full.txt` file containing the metadata for the pre-processed audio samples you want to challenge your model with in this test, also known as your test dataset or testset. For example, if you want to test a pre-trained model against Covers80 benchmarks, then you would specify the `full.txt` file generated from step 2 in the example above.
+
+#### ref_path
+Also a path to a `full.txt` file. Which file depends on whether your testset comes from the same musical repertoire as your training data or not. 
+- If you want to test how well your model performs in your targeted musical culture (the one you used as training data), and the testset uses the same `work_id` to identify works as the `work_id` used in your reference data - which would only be possible if they're from the same target musical culture - then specify the `full.txt` file containing the metadata for all the works your model claims familiarity with. Then this script will measure how well your model is able to correctly identify the work_id for each performance in the testset.
+- Whereas if you want to test how well your model can handle a completely foreign testset, with no real-world relationship at all between `work_id` as used in your own model's data to the `work_id` assigned in the testset, then specify the exact same `full.txt` path as you provided for `query_path`. In this case this script will test how well your model is able to assign the correct work to each performance in the testset, defined simply by the `work_id` provided in this `full.txt` file.
+
 #### query_in_ref_path
-CoverHunter only shared an evaluation example for the case when query and reference data are identical, presumably to do a self-similarity evaluation of the model. But there is an optional 4th parameter for `query_in_ref_path` that would be relevant if query and reference are not identical. See the "query_in_ref" heading below under "Input and Output Files."
+Optional. Path to your `query_in_ref.txt` file. This parameter that is only relevant if `query_path` and `ref_path` are not identical files. See the "query_in_ref" heading below under "Input and Output Files." You can use the `tools.make_query_in_ref` utility to automatically generate the `query_in_ref.txt` file after specifying your query and ref files at the top of that script.
 
 #### plot_name
 The optional `plot_name` argument is a path or just a filename where you want to save the t-SNE plot output. If you provide just a filename, `model_dir` will be used as the path. See example plot below. Note that your query and reference files must be identical to generate a t-SNE plot (to do a self-similarity evaluation).
