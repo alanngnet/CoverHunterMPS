@@ -185,24 +185,20 @@ def _main():
     data_hp = load_hparams(os.path.join(data_dir, "hparams.yaml"))
     model_hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
 
-    match model_hp["device"]:  # noqa requires Python 3.10
-        case "mps":
-            assert (
-                torch.backends.mps.is_available()
-            ), "You requested 'mps' device in your hyperparameters but you are not running on an Apple M-series chip or have not compiled PyTorch for MPS support."
-            device = torch.device("mps")
-        case "cuda":
-            assert (
-                torch.cuda.is_available()
-            ), "You requested 'cuda' device in your hyperparameters but you do not have a CUDA-compatible GPU available."
-            device = torch.device("cuda")
-        case _:
-            print(
-                "You set device: ",
-                model_hp["device"],
-                " in your hyperparameters but that is not a valid option.",
-            )
-            exit()
+    # Auto-detect optimal device (inference device is independent of training device)
+    # Set hyperparameters anyway because downstream code expects hp["device"]
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+        model_hp["device"] = "mps"
+        data_hp["device"] = "mps"
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+        model_hp["device"] = "cuda"
+        data_hp["device"] = "cuda"
+    else:
+        device = torch.device("cpu")
+        model_hp["device"] = "cpu"
+        data_hp["device"] = "cpu"
 
     ## Get query embedding
     # next logic copied from eval_testset.py eval_for_map_with_feat()
