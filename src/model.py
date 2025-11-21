@@ -3,7 +3,6 @@
 import logging
 from typing import Dict, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -37,8 +36,12 @@ class AttentiveStatisticsPooling(torch.nn.Module):
         self._eps = 1e-12
         self._linear = Linear(channels * 3, channels)
         self._tanh = torch.nn.Tanh()
-        self._conv = Conv1d(in_channels=channels, out_channels=channels, kernel_size=1)
-        self._final_layer = torch.nn.Linear(channels * 2, output_channels, bias=False)
+        self._conv = Conv1d(
+            in_channels=channels, out_channels=channels, kernel_size=1
+        )
+        self._final_layer = torch.nn.Linear(
+            channels * 2, output_channels, bias=False
+        )
         logging.info(
             "Init AttentiveStatisticsPooling with %s->%s",
             channels,
@@ -46,9 +49,13 @@ class AttentiveStatisticsPooling(torch.nn.Module):
         )
 
     @staticmethod
-    def _compute_statistics(x: torch.Tensor, m: torch.Tensor, eps: float, dim: int = 2):
+    def _compute_statistics(
+        x: torch.Tensor, m: torch.Tensor, eps: float, dim: int = 2
+    ):
         mean = (m * x).sum(dim)
-        std = torch.sqrt((m * (x - mean.unsqueeze(dim)).pow(2)).sum(dim).clamp(eps))
+        std = torch.sqrt(
+            (m * (x - mean.unsqueeze(dim)).pow(2)).sum(dim).clamp(eps)
+        )
         return mean, std
 
     def forward(self, x: torch.Tensor):
@@ -76,14 +83,18 @@ class AttentiveStatisticsPooling(torch.nn.Module):
             self._tanh(self._linear(attn.transpose(1, 2)).transpose(1, 2)),
         )
 
-        attn = attn.masked_fill(mask == 0, float("-inf"))  # Filter out zero-padding
+        attn = attn.masked_fill(
+            mask == 0, float("-inf")
+        )  # Filter out zero-padding
         attn = F.softmax(attn, dim=2)
         mean, std = self._compute_statistics(x, attn, self._eps)
         # returns pooled statistics
         return self._final_layer(torch.cat((mean, std), dim=1))
 
     def forward_with_mask(
-        self, x: torch.Tensor, lengths: Optional[torch.Tensor] = None,
+        self,
+        x: torch.Tensor,
+        lengths: Optional[torch.Tensor] = None,
     ):
         """
         Calculate mean and std for a batch (input tensor).
@@ -161,10 +172,12 @@ class AttentiveStatisticsPooling(torch.nn.Module):
         assert len(length.shape) == 1
 
         if max_len is None:
-            max_len = length.max().long().item()  # using arange to generate mask
-        mask = torch.arange(max_len, device=length.device, dtype=length.dtype).expand(
-            len(length), max_len,
-        ) < length.unsqueeze(1)
+            max_len = (
+                length.max().long().item()
+            )  # using arange to generate mask
+        mask = torch.arange(
+            max_len, device=length.device, dtype=length.dtype
+        ).expand(len(length), max_len,) < length.unsqueeze(1)
 
         if dtype is None:
             dtype = length.dtype
@@ -199,10 +212,6 @@ class Model(torch.nn.Module):
         """
         super().__init__()
         self._hp = hp
-        # Uncomment the next line if you want to use a pre-trained model from
-        # from the original CoverHunter repo, such as the model those authors
-        # published with their repo.
-        # hp["foc"] = hp["ce"] # handles the renaming of "ce" to "foc" 
         self._epoch = 0
         self._step = 0
         self._global_cmvn = torch.nn.BatchNorm1d(hp["input_dim"])
@@ -218,7 +227,8 @@ class Model(torch.nn.Module):
         # higher-dimensional output space that could risk inference quality
         if hp["encoder"]["output_dims"] != hp["embed_dim"]:
             self._embed_lo = torch.nn.Linear(
-                hp["encoder"]["output_dims"], hp["embed_dim"],
+                hp["encoder"]["output_dims"],
+                hp["embed_dim"],
             )
         else:
             self._embed_lo = None
@@ -228,13 +238,16 @@ class Model(torch.nn.Module):
         self._bottleneck.bias.requires_grad_(False)  # no shift
 
         self._pool_layer = AttentiveStatisticsPooling(
-            hp["embed_dim"], output_channels=hp["embed_dim"],
+            hp["embed_dim"],
+            output_channels=hp["embed_dim"],
         )
         # _ce_layer should be _foc_layer but retaining historical name to avoid
         # breaking compatibility with legacy checkpoint files such as pre-trained models
         # see CoverHunter paper about their switch from cross-entropy to focal loss
         self._ce_layer = torch.nn.Linear(
-            hp["embed_dim"], hp["foc"]["output_dims"], bias=False,
+            hp["embed_dim"],
+            hp["foc"]["output_dims"],
+            bias=False,
         )
 
         # Loss
@@ -253,7 +266,11 @@ class Model(torch.nn.Module):
         logging.info("Model size: %.3fM\n", self.model_size() / 1000 / 1000)
 
     def load_model_parameters(
-        self, model_dir, epoch_num=-1, device="mps", advanced=False,
+        self,
+        model_dir,
+        epoch_num=-1,
+        device="mps",
+        advanced=False,
     ):
         """
         Load parameters from pt model, and return model epoch.
@@ -266,7 +283,9 @@ class Model(torch.nn.Module):
             model_path = get_model_with_epoch(model_dir, "g_", epoch_num)
             assert model_path, f"Error:model with epoch {epoch_num} not found"
 
-        state_dict_g = torch.load(model_path, map_location=device,weights_only=False)["generator"]
+        state_dict_g = torch.load(
+            model_path, map_location=device, weights_only=False
+        )["generator"]
         if advanced:
             model_dict = self.state_dict()
             valid_dict = {
@@ -285,26 +304,26 @@ class Model(torch.nn.Module):
         logging.info(
             "Successful init model with epoch-%d, device:%s\n",
             self._epoch,
-            device
+            device,
         )
         return self._epoch
 
     # Unused
-    #def save_model_parameters(self, g_checkpoint_path) -> None:
+    # def save_model_parameters(self, g_checkpoint_path) -> None:
     #    torch.save({"generator": self.state_dict()}, g_checkpoint_path)
 
     # Unused
-    #def get_epoch_num(self):
+    # def get_epoch_num(self):
     #    return self._epoch
 
     # Unused
-    #def get_step_num(self):
+    # def get_step_num(self):
     #    return self._step
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         feat[b, frame_size, feat_size] -> embed[b, embed_dim]
-        
+
         Modifies x in the calling scope's context.
         """
 
@@ -327,7 +346,9 @@ class Model(torch.nn.Module):
 
     #  @torch.jit.ignore
     def compute_loss(
-        self, anchor: torch.Tensor, label: torch.Tensor,
+        self,
+        anchor: torch.Tensor,
+        label: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict]:
         """Compute focal and triplet loss."""
         f_t = self.forward(anchor)
@@ -354,7 +375,9 @@ class Model(torch.nn.Module):
         return loss, loss_dict
 
     @torch.jit.ignore
-    def inference(self, feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def inference(
+        self, feat: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         with torch.no_grad():
             embed = self.forward(feat)
             embed_foc = self._ce_layer(embed)
@@ -368,13 +391,13 @@ class Model(torch.nn.Module):
         return sum(p.numel() for p in self.parameters())
 
     # Unused
-    #def dump_torch_script(self, dump_path) -> None:
+    # def dump_torch_script(self, dump_path) -> None:
     #    script_model = torch.jit.script(self)
     #    script_model.save(dump_path)
     #    logging.info(f"Export model successfully, see {dump_path}")
 
     # Unused
-    #@torch.jit.export
-    #def compute_embed(self, feat: torch.Tensor) -> torch.Tensor:
+    # @torch.jit.export
+    # def compute_embed(self, feat: torch.Tensor) -> torch.Tensor:
     #    with torch.no_grad():
     #        return self.forward(feat)
