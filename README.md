@@ -127,10 +127,19 @@ Tip for deep learning newbies: A good AI assistant can help greatly with hyperpa
 
 This script evaluates your trained model by providing standard mAP (mean average precision) and MR1 (mean rank one) training metrics, plus an optional t-SNE clustering plot (compare Fig. 3 in the CoverHunter paper).
 
-1. Have a pre-trained CoverHunter model's output checkpoint files available. You only need your best set (typically your highest-numbered one). If you use original CoverHunter's pre-trained model from https://drive.google.com/file/d/1rDZ9CDInpxQUvXRLv87mr-hfDfnV7Y-j/view), unzip it, and move it to a folder that you specify in step 3 below.
-2. Run your query data through `extract_csi_features.py`. In the `hparams.yaml` file for the feature extraction, turn off all augmentation. See `data/covers80_testset/hparams.yaml` for an example configuration to treat covers80 as the query data:<br> `python3 -m tools.extract_csi_features data/covers80_testset`<br>
+1. Have a pre-trained CoverHunter model's output checkpoint files available. You only need your best `g_000NNNN` file (typically your highest-numbered one).
+    * If you use original CoverHunter's pre-trained model from https://drive.google.com/file/d/1rDZ9CDInpxQUvXRLv87mr-hfDfnV7Y-j/view (65 MB):
+         1. Unzip it, and move it to a folder that you specify in step 3 below, let's say as `training/pretrain_model` in your project folder.
+         2. Rename the `pt_model` subfolder to `checkpoints` because that's where CoverHunterMPS expects model checkpoint files. (You actually only need the `g_0000...` file in there to just do evaluation or inference.) 
+         3. Temporarily uncomment line 205 in `/src/model.py`. Otherwise, if you attempt to run that model using CoverHunterMPS code as-is, you will get the following error because CoverHunter's model was trained on the old CoverHunter code base. CoverHunterMPS renamed the `ce` hyperparameter to make more sense as `foc` (because that is actually used for the focal-loss hyperparameter):
+        ```File "[...]/src/model.py", line 233, in __init__
+        hp["embed_dim"], hp["foc"]["output_dims"], bias=False,
+                         ~~^^^^^^^
+        KeyError: 'foc'```
+        4. Note that the above Google Drive-hosted file belongs to Liu Feng, the CoverHunter repo owner, and nobody on the CoverHunterMPS project has any control of it.
+3. Run your query data through `extract_csi_features.py`. In the `hparams.yaml` file for the feature extraction, turn off all augmentation. See `data/covers80_testset/hparams.yaml` for an example configuration to treat covers80 as the query data:<br> `python3 -m tools.extract_csi_features data/covers80_testset`<br>
 The important output from that is `full.txt` and the `cqt_feat` subfolder's contents.
-3. Run the evaluation script. This example assumes you are using the trained model you created in `training/covers80` and you want to use all the optional features I added in this fork:<br>
+4. Run the evaluation script. This example assumes you are using the trained model you created in `training/covers80` and you want to use all the optional features I added in this fork:<br>
 `python3 -m tools.eval_testset training/covers80 data/covers80_testset/full.txt data/covers80_testset/full.txt -plot_name="training/covers80/tSNE.png" -dist_name='distmatrix' -test_only_labels='data/covers80/test-only-work-ids.txt'`
 
 See the "Training checkpoint output" section below for a description of the embeddings saved by the `eval_for_map_with_feat()` function called in this script. They are saved in a new subfolder of the `pretrained_model` folder named `embed_NN_tmp` where NN is the highest-numbered epoch subfolder in the `pretrained_model` folder.
