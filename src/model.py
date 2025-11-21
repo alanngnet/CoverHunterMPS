@@ -199,6 +199,10 @@ class Model(torch.nn.Module):
         """
         super().__init__()
         self._hp = hp
+        # Uncomment the next line if you want to use a pre-trained model from
+        # from the original CoverHunter repo, such as the model those authors
+        # published with their repo.
+        # hp["foc"] = hp["ce"] # handles the renaming of "ce" to "foc" 
         self._epoch = 0
         self._step = 0
         self._global_cmvn = torch.nn.BatchNorm1d(hp["input_dim"])
