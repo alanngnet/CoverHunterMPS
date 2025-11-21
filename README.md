@@ -135,14 +135,15 @@ This script evaluates your trained model by providing standard mAP (mean average
         ```File "[...]/src/model.py", line 233, in __init__
         hp["embed_dim"], hp["foc"]["output_dims"], bias=False,
                          ~~^^^^^^^
-        KeyError: 'foc'```
+        KeyError: 'foc'
+        ```
         4. Note that the above Google Drive-hosted file belongs to Liu Feng, the CoverHunter repo owner, and nobody on the CoverHunterMPS project has any control of it.
 3. Run your query data through `extract_csi_features.py`. In the `hparams.yaml` file for the feature extraction, turn off all augmentation. See `data/covers80_testset/hparams.yaml` for an example configuration to treat covers80 as the query data:<br> `python3 -m tools.extract_csi_features data/covers80_testset`<br>
 The important output from that is `full.txt` and the `cqt_feat` subfolder's contents.
 4. Run the evaluation script. This example assumes you are using the trained model you created in `training/covers80` and you want to use all the optional features I added in this fork:<br>
 `python3 -m tools.eval_testset training/covers80 data/covers80_testset/full.txt data/covers80_testset/full.txt -plot_name="training/covers80/tSNE.png" -dist_name='distmatrix' -test_only_labels='data/covers80/test-only-work-ids.txt'`
 
-See the "Training checkpoint output" section below for a description of the embeddings saved by the `eval_for_map_with_feat()` function called in this script. They are saved in a new subfolder of the `pretrained_model` folder named `embed_NN_tmp` where NN is the highest-numbered epoch subfolder in the `pretrained_model` folder.
+See the "Training checkpoint output" section below for a description of the embeddings saved by the `eval_for_map_with_feat()` function called in this script. They are saved in a new subfolder of the evaluated model's folder, named `embed_NN_tmp` where NN is the highest-numbered epoch in the model's `checkpoints` subfolder.
 
 ### Arguments
 
