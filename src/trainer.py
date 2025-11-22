@@ -345,6 +345,7 @@ class Trainer:
                 batch_size=self.hp["batch_size"],
                 device=self.device,
                 logger=self.logger,
+                reuse_embeddings=False,
             )
 
             self.summary_writer.add_scalar(

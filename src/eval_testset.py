@@ -65,7 +65,7 @@ def _cluster_plot(
 
     if marks == "ids":
         marker_styles = [f"${label}$" for label in unique_labels]
-    
+
     for i, label in enumerate(unique_labels):
         # Assign color for label
         color_dict[label] = colors[i % num_colors]
@@ -245,6 +245,7 @@ def _generate_dist_matrixMPS(
 
     return dist_matrix, query_label, ref_label
 
+
 # =============================================================================
 # The original CoverHunter distance matrix function was very slow at scale.
 # It did not use multiprocessing (only one core of the CPU).
@@ -351,6 +352,7 @@ def eval_for_map_with_feat(
     marks="markers",
     dist_name="",
     test_only_labels=None,
+    reuse_embeddings=False,
 ):
     """compute map10 with trained model and query/ref loader(dataset loader
     can speed up process dramatically)
@@ -389,6 +391,25 @@ def eval_for_map_with_feat(
         logger.info(f"using batch-size: {batch_size}")
 
     os.makedirs(embed_dir, exist_ok=True)
+    if not reuse_embeddings and os.path.exists(embed_dir):
+        import shutil
+
+        if logger:
+            logger.info(f"Clearing existing embeddings directory: {embed_dir}")
+        shutil.rmtree(embed_dir)
+        os.makedirs(embed_dir, exist_ok=True)
+    elif reuse_embeddings and os.path.exists(embed_dir):
+        existing_files = [
+            f
+            for f in os.listdir(embed_dir)
+            if f.endswith(".npy") or f.endswith(".txt")
+        ]
+        if logger and existing_files:
+            logger.warning(
+                f"REUSING existing embeddings from: {embed_dir}\n"
+                f"Found {len(existing_files)} existing files.\n"
+                f"This assumes data and CQT parameters haven't changed."
+            )
 
     model.eval()
     model = model.to(device)

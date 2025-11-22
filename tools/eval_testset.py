@@ -53,6 +53,11 @@ def _main() -> None:
         type=str,
         help="Save the distance matrix to this path",
     )
+    parser.add_argument(
+        "--reuse-embeddings",
+        action="store_true",
+        help="Reuse existing embeddings in embed_NN_tmp if present (faster but risky if data or parameters have changed)",
+    )
 
     args = parser.parse_args()
     model_dir = args.model_dir
@@ -116,6 +121,7 @@ def _main() -> None:
         plot_name=plot_name,
         marks=args.marks,
         dist_name=args.dist_name,
+        reuse_embeddings=args.reuse_embeddings,
     )
 
 

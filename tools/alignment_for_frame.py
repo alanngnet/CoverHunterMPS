@@ -18,11 +18,14 @@ torch.backends.cudnn.benchmark = True
 
 
 def _main() -> None:
-    parser = argparse.ArgumentParser(description="alignment with coarse trained model")
+    parser = argparse.ArgumentParser(
+        description="alignment with coarse trained model"
+    )
     parser.add_argument("model_dir", help="coarse trained dir")
     parser.add_argument("data_path", help="input file contains init data")
     parser.add_argument(
-        "alignment_path", help="output file contains alignment information",
+        "alignment_path",
+        help="output file contains alignment information",
     )
 
     args = parser.parse_args()
@@ -72,6 +75,7 @@ def _main() -> None:
         query_in_ref_path=None,
         batch_size=64,
         logger=logger,
+        reuse_embeddings=False,
     )
     logger.info(f"Test, map:{mean_ap}")
 
