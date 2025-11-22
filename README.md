@@ -142,7 +142,7 @@ This script evaluates your trained model by providing standard mAP (mean average
 The important output from that is `full.txt` and the `cqt_feat` subfolder's contents.
 4. Run the evaluation script.
     - Example if you trained your own quick testing model using covers80 as your training data and you want to try out all the optional features I added to `eval_testset.py` in this fork:<br>
-`python3 -m tools.eval_testset training/covers80 data/covers80_testset/full.txt data/covers80_testset/full.txt -plot_name="training/covers80/tSNE.png" -dist_name='distmatrix' -test_only_labels='data/covers80/test-only-work-ids.txt'`
+`python3 -m tools.eval_testset training/covers80 data/covers80_testset/full.txt data/covers80_testset/full.txt -plot_name="training/covers80/tSNE.png" -dist_name='distmatrix' -test_only_labels='data/covers80/test-only-work-ids.txt' --reuse-embeddings`
     - Example if you are using the CoverHunter pretrained model and just want the covers80 metrics:
 `python -m tools.eval_testset training/pretrain_model data/covers80_testset/full.txt data/covers80_testset/full.txt`
 
@@ -179,7 +179,10 @@ This figure shows the results of training from scratch on the covers80 dataset w
 The optional `dist_name` argument is a path where you want to save the distance matrix and ref labels so that you can study the results separately, such as perhaps doing custom t-SNE plots, etc.
 
 #### marks
-The default value for the optional `marks` argument is 'markers', which makes the output for `plot_name` differentiate works by using using standard matplotlib markers in various colors and shapes. The alternative value is 'ids' which uses the `work_id` numbers defined by extract_csi_features instead of matplotlib markers.   
+The default value for the optional `marks` argument is 'markers', which makes the output for `plot_name` differentiate works by using using standard matplotlib markers in various colors and shapes. The alternative value is 'ids' which uses the `work_id` numbers defined by extract_csi_features instead of matplotlib markers.
+
+#### reuse-embeddings
+Optional flag to activate this script's original default behavior of re-using any existing embeddings in the temporary embeddings folder created by and for this script's use. Use this **only** if you are certain that none of the testset data and none of the hyperparameters have changed since the existing embeddings were generated, otherwise the metrics from this script will be misleading. The reason to use it in that case would be for very large testsets where reducing evaluation compute time for repeated evaluations is a consideration.
 
 ## Production Training
 
