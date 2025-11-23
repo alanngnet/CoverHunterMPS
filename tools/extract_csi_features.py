@@ -192,7 +192,11 @@ def _extract_cqt_worker_torchaudio(args):
         transform = CQT2010v2
 
     signal, sr = torchaudio.load(wav_path)
-    if sr != 16000:  # for example, in case input is .mp3
+    # Force mono by averaging channels if stereo
+    if signal.shape[0] > 1:
+        signal = torch.mean(signal, dim=0, keepdim=True)
+    # Resample if needed, for example, in case input is .mp3
+    if sr != 16000:
         signal = torchaudio.functional.resample(signal, sr, 16000)
     signal = signal.to(device)
     signal = (
