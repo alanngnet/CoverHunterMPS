@@ -191,8 +191,9 @@ def _extract_cqt_worker_torchaudio(args):
     elif device == "cuda":
         transform = CQT2010v2
 
-
     signal, sr = torchaudio.load(wav_path)
+    if sr != 16000:  # for example, in case input is .mp3
+        signal = torchaudio.functional.resample(signal, sr, 16000)
     signal = signal.to(device)
     signal = (
         signal
@@ -219,13 +220,13 @@ def _extract_cqt_worker_torchaudio(args):
     signal = torch.swapaxes(signal, 0, 1)
     cqt = signal.numpy(force=True)
 
-    # does this help prevent MPS hanging between batches?        
+    # does this help prevent MPS hanging between batches?
     if device == "mps":
         torch.mps.synchronize()
     elif device == "cuda":
         torch.cuda.synchronize()
     np.save(feat_path, cqt)
-    
+
     feat_len = len(cqt)
     line["feat"] = feat_path
     line["feat_len"] = feat_len
@@ -237,7 +238,7 @@ def worker(args):
     try:
         if device in ("mps", "cuda"):
             return _extract_cqt_worker_torchaudio(args)
-    
+
         return _extract_cqt_worker_librosa(
             line, cqt_dir, fmin, max_freq, bins_per_octave
         )
@@ -252,22 +253,24 @@ def _extract_cqt_parallel(
     dump_lines = []
     # calculate max_freq in case CPU device requires use of the PyCQT function
     max_freq = fmin * (2 ** (n_bins / bins_per_octave))
-    
+
     # Pre-process to separate existing from missing CQT files
     lines = read_lines(init_path, log=False)
     missing_cqt_lines = []
-    
+
     for line in lines:
         local_data = line_to_dict(line)
-        feat_path = os.path.join(cqt_dir, "{}.cqt.npy".format(local_data["perf"]))
-        
+        feat_path = os.path.join(
+            cqt_dir, "{}.cqt.npy".format(local_data["perf"])
+        )
+
         if os.path.exists(feat_path):
-            # Get file size instead of 
+            # Get file size instead of
             # loading existing CQT files to estimate feat_len
             # Note that feat_len is only used when training with mode="random"
             # and even then it ends up extracting the real length anyway
             # AudioFeatDataset.__getitem__()
-            
+
             file_size = os.path.getsize(feat_path)
             # Rough estimate: each frame is n_bins * 8 bytes (float64)
             estimated_feat_len = file_size // (n_bins * 8)
@@ -276,21 +279,23 @@ def _extract_cqt_parallel(
             dump_lines.append(dict_to_line(local_data))
         else:
             missing_cqt_lines.append(line)
-        
-    logging.info(f"Found {len(dump_lines)} existing CQT files, need to process {len(missing_cqt_lines)} files")
-    
+
+    logging.info(
+        f"Found {len(dump_lines)} existing CQT files, need to process {len(missing_cqt_lines)} files"
+    )
+
     if not missing_cqt_lines:
         write_lines(out_path, dump_lines)
         return
-    
-    # Process data in smaller batches as workaround to memory leak 
+
+    # Process data in smaller batches as workaround to memory leak
     # encountered in large runs, probably in nnAudio library
     batch_size = 2000
     lines = read_lines(init_path, log=False)
-    mp.set_start_method('spawn', force=True)
+    mp.set_start_method("spawn", force=True)
 
     for i in range(0, len(missing_cqt_lines), batch_size):
-        batch = missing_cqt_lines[i:i+batch_size]
+        batch = missing_cqt_lines[i : i + batch_size]
         with ProcessPoolExecutor() as executor:
             worker_args = [
                 (
@@ -304,9 +309,11 @@ def _extract_cqt_parallel(
                 )
                 for line in batch
             ]
-    
+
             for result in executor.map(worker, worker_args):
-                if isinstance(result, str) and result.startswith("Error processing line:"):
+                if isinstance(result, str) and result.startswith(
+                    "Error processing line:"
+                ):
                     print(result)  # This will print only the error lines
                     continue
                 dump_lines.append(dict_to_line(result))
@@ -327,6 +334,7 @@ def _extract_cqt_parallel(
         gc.collect()
         # Small delay to let system recover
         import time
+
         time.sleep(0.1)
     write_lines(out_path, dump_lines)
 
