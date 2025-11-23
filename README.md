@@ -58,10 +58,8 @@ Follow the example of the prepared Covers80 dataset included with the original C
 2. Abandon the 2-level folder structure that came inside the covers80.tgz file, flattening so all the .mp3 files are in the same folder. One way to do this is:
     1. In Terminal, go to the extracted `coversongs` folder as the current directory. Then: 
     2. `cd covers32k && mv */* .; rm -r */`
-3. Convert all the provided .mp3 files to .wav format. One way to do this is:
-    1. `setopt EXTENDED_GLOB; for f in *.mp3; do sox "$f" -r 16000 "${f%%.mp3}.wav" && rm "$f"; done`
-4. Move all these new .wav files to a new folder called `wav_16k` in the project's `data/covers80` folder.
-5. You can delete the rest of the downloaded `covers80.tgz` contents.
+3. Move all these .mp3 files to a new folder called `wav_16k` in the project's `data/covers80` folder.
+4. You can delete the rest of the downloaded `covers80.tgz` contents.
 
 Background explanation: Covers80 is a small, widely used dataset of modern, Western pop music intended only for benchmarking purposes, so that the accuracy of different approaches to solving the problem of CSI can be compared against each other. It is far too small to be useful for neural-network training, but it is a rare example of a published, stable collection of audio files. This makes it easy for you to get started, so you can confirm you have a working setup of this project without having to have your own set of audio files and their metadata ready. You might even end up using Covers80 yourself as a benchmarking test to see how well your own training project handles modern, Western pop music in comparison to published Covers80 benchmarks from other CSI projects.
 
@@ -73,6 +71,7 @@ To use the Covers80 example you prepared above, next run this from the project r
 
 `python3 -m tools.extract_csi_features data/covers80/`
 
+This script accepts whatever audio file formats are supported by `torchaudio.load` (assuming you are using GPU) or `librosa.load` (assuming you are using CPU). It does force 16kHz sampling rates as a baked-in assumption throughout this project.
 
 ## Training
 
