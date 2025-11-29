@@ -6,6 +6,8 @@ See https://ar5iv.labs.arxiv.org/html/2306.09025 for the July 2023 research pape
 
 > Cover song identification (CSI) focuses on finding the same music with different versions in reference anchors given a query track. In this paper, we propose a novel system named CoverHunter that overcomes the shortcomings of existing detection schemes by exploring richer features with refined attention and alignments. [...] Experiments on several standard CSI datasets show that our method significantly improves over state-of-the-art methods [...].
 
+The "MPS" in this project's name refers to the Apple "Metal Performance Shaders" technology used on Apple Silicon hardware. Original CoverHunter only supported CUDA (Nvidia) GPUs. This project supports **both** CUDA and MPS GPUs, which makes this tool accessible to more musicologists who frequently work on Apple hardware and do not have access to industrial-scale server farms or research computing centers.
+
 The CoverHunterMPS project also has longer-term goals to expand the utility of the CoverHunter model to address a wide range of musicological questions and needs, such as:
 - Identify known repertoire items in new, unfamiliar audio (basic CSI)
 - Discover and describe how to adapt training hyperparameters for specific musical cultures.
