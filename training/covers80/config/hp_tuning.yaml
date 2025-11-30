@@ -1,3 +1,5 @@
+### CoverHunterMPS hyperparameters for tuning training hyperparameters
+
 # Configuration file for tools/train_tune.py
 #
 # The main hparams.yaml is used to define the default values for all hyperparameters

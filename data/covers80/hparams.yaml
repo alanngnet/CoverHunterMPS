@@ -1,3 +1,5 @@
+### CoverHunterMPS dataset preparation hyperparameters
+
 "fmin": 32  # default 32
 "n_bins": 96  # default 96
 "bins_per_octave": 12  # default 12

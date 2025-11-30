@@ -1,3 +1,5 @@
+### CoverHunterMPS dataset preparation hyperparameters
+
 "device": "mps"
 "fmin": 32  # default 32
 "n_bins": 96  # default 96

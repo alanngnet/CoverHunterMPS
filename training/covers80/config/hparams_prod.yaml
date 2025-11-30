@@ -1,3 +1,5 @@
+### CoverHunterMPS production training hyperparameters
+
 ### Training data paths
 train_path: "data/covers80/full.txt"
 test_path: "data/reels50easy_testset/full.txt"
@@ -10,15 +12,15 @@ covers80:
   
 # Download the reels50easy dataset from https://www.irishtune.info/public/MLdata.htm
 # and then you can uncomment the next 4 lines.
-reels50easy:
-  query_path: "data/reels50easy_testset/full.txt"  # path to your bench
-  ref_path: "data/reels50easy_testset/full.txt"
-  every_n_epoch_to_test: 1
+# reels50easy:
+#  query_path: "data/reels50easy_testset/full.txt"  # path to your prepared data
+#  ref_path: "data/reels50easy_testset/full.txt"
+#  every_n_epoch_to_test: 1
 
 # Download the reels50hard dataset from https://www.irishtune.info/public/MLdata.htm
 # and then you can uncomment the next 4 lines.
 #reels50hard:
-#  query_path: "data/reels50hard_testset/full.txt"  # path to your bench
+#  query_path: "data/reels50hard_testset/full.txt"  # path to your prepared data
 #  ref_path: "data/reels50hard_testset/full.txt"
 #  every_n_epoch_to_test: 1
 
