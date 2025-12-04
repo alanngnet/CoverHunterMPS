@@ -54,7 +54,8 @@ class CenterLoss(nn.Module):
             .expand(self.num_classes, batch_size)
             .t()
         )
-        distmat.addmm_(1, -2, x, self.centers.t())
+        distmat.addmm_(x, self.centers.t(), beta=1, alpha=-2)
+        # original CoverHunter: distmat.addmm_(1, -2, x, self.centers.t())
 
         classes = torch.arange(self.num_classes).long()
         classes = classes.to(self.device)
@@ -63,7 +64,6 @@ class CenterLoss(nn.Module):
 
         dist = distmat * mask.float()
         return dist.clamp(min=1e-12, max=1e12).sum() / batch_size
-
 
 
 # @typechecked
@@ -92,7 +92,9 @@ class FocalLoss(nn.Module):
         self.device = device  # PyTorch GPU device
         logging.info(f"Init Focal loss with gamma:{gamma}")
 
-    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, y_pred: torch.Tensor, y_true: torch.Tensor
+    ) -> torch.Tensor:
         """compute focal loss for pred and label
 
         Args:
@@ -104,7 +106,7 @@ class FocalLoss(nn.Module):
         """
         b = y_pred.size(0)
         y_pred_softmax = torch.nn.Softmax(dim=1)(y_pred) + self._eps
-        foc = -torch.log(y_pred_softmax) 
+        foc = -torch.log(y_pred_softmax)
         # =============================================================================
         # original CoverHunter code threw error at foc.gather that it expected index to be of type int64
         #  force to meet foc.gather's expectations of int64
@@ -155,15 +157,23 @@ class HardTripletLoss(nn.Module):
         """
         pairwise_dist = self._pairwise_distance(embeddings, squared=False)
 
-        mask_anchor_positive = self._get_anchor_positive_triplet_mask(labels).float()
+        mask_anchor_positive = self._get_anchor_positive_triplet_mask(
+            labels
+        ).float()
         valid_positive_dist = pairwise_dist * mask_anchor_positive
-        hardest_positive_dist, _ = torch.max(valid_positive_dist, dim=1, keepdim=True)
+        hardest_positive_dist, _ = torch.max(
+            valid_positive_dist, dim=1, keepdim=True
+        )
 
         # Get the hardest negative pairs
         mask_negative = self._get_anchor_negative_triplet_mask(labels).float()
         max_negative_dist, _ = torch.max(pairwise_dist, dim=1, keepdim=True)
-        negative_dist = pairwise_dist + max_negative_dist * (1.0 - mask_negative)
-        hardest_negative_dist, _ = torch.min(negative_dist, dim=1, keepdim=True)
+        negative_dist = pairwise_dist + max_negative_dist * (
+            1.0 - mask_negative
+        )
+        hardest_negative_dist, _ = torch.min(
+            negative_dist, dim=1, keepdim=True
+        )
 
         # Combine biggest d(a, p) and smallest d(a, n) into final triplet loss
         triplet_loss = F.relu(
