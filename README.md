@@ -110,7 +110,7 @@ To see the TensorBoard live visualization of the model's progress during trainin
 
 After you use the tools.train script to confirm your data is usable with CoverHunterMPS, and perhaps to do some basic experimentation, you may be motivated to experiment with a wide range of training hyperparameters to discover the optimal settings for your data that will lead you to better training metrics. You should be able to use your knowledge of its unique musical characteristics to make some educated guesses on how to diverge from the default CoverHunter hyperparameters, which were optimized for Western pop music.
 
-Step 1: Study the explanations in the Training Hyperparameters section below to make some hypotheses about alternative hyperparameter values to try with your data. 
+Step 1: Study the explanations in the Training Hyperparameters section below to make some hypotheses about alternative hyperparameter values to try with your data. *Tip for deep learning newbies*: A good AI assistant can help greatly with hyperparameter tuning advice. Give it this project's files, detailed descriptions of your dataset, the hyperparameters you've tried and their results, and even perhaps the corresponding screenshots of your resulting Tensorboard validation loss and testset mAP metrics. Then ask it for advice on what to try next.
 
 Step 2: Add your hypotheses as specific hyperparameter values to try in the hp_tuning.yaml file in the model's training folder, following the comments and examples there. 
 
@@ -130,20 +130,18 @@ Experiment: FOC_dims801_wt1.0_gamma2_TRIP_marg0.3_wt0.5_CNTR_wt0.02
   val_loss: 0.6723±0.0099  (slope: -0.0538)
   mAP:      0.4857±0.0105  (slope: +0.0413)
 ```
-The `slope` tells you whether that metric was still improving or had stabilized (possibly overfitting) within the final `early_stopping_patience` epochs. Considering mAP slope and val_loss in combination generally suggests:
+While your mAP absolute value results are by far the most important metric to watch, the `slope` is useful for telling you whether that metric was still improving or had stabilized (possibly overfitting) within the final `early_stopping_patience` epochs. Considering mAP slope and val_loss slope in combination generally suggests:
 
 |Pattern | Meaning |
 |---|---|
-|`val_loss` slope < 0, `mAP` slope > 0 | Still improving—train longer|
-|Both slopes ≈ 0|Properly converged|
-|`val_loss` slope > 0, `mAP` slope < 0|Overfitting—reduce number of tuning epochs or patience|
+|`val_loss` slope < 0, `mAP` slope > 0 | Still improving, training is healthy so far (ideal result for tuning).|
+|Both slopes ≈ 0|Converged (done). Your tuning epochs are as long as a full training run would go, perhaps wasting your time and compute.|
+|`val_loss` slope > 0, `mAP` slope < 0|Overfitting— either this hyperparameter value is bad or you've burned through too many epochs for useful tuning.|
 |Slopes disagree strongly|Loss/mAP decoupled—investigate loss weights|
 
 This script will not retain any model checkpoints from the training runs, but it does create separate log files for each run that you can monitor and study in TensorBoard.
 
 If you are running on a CUDA platform, the `make_deterministic()` function in tools.train_tune may have significant performance disadvantages for you. Consider whether you'd rather comment out that line and instead run enough different random seeds to compensate for non-deterministic training behavior so that you can reliably compare results between different hyperparameter settings.
-
-Tip for deep learning newbies: A good AI assistant can help greatly with hyperparameter tuning advice. Give it this project's files, the hyperparameters you tried, and the corresponding screenshots of your resulting Tensorboard validation loss and testset mAP metrics. Then ask it for advice on what to try next. 
 
 ## Evaluation
 
