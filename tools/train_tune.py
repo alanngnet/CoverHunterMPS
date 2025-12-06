@@ -107,22 +107,53 @@ def run_experiment(
     return log_path
 
 
-def get_final_metrics_from_logs(log_dir, test_name):
-    # Find the latest event file in the log directory
+def get_final_metrics_from_logs(log_dir, test_name, slope_window=3):
+    """
+    Extract training metrics from TensorBoard logs.
+
+    Returns dict with:
+        - val_loss: final validation focal loss
+        - val_loss_slope: slope over last slope_window epochs
+                          (negative = improving, ~0 = converged, positive = overfitting)
+        - map: final mAP on test_name
+        - map_slope: slope of mAP over last slope_window epochs
+                     (positive = improving, ~0 = converged, negative = degrading)
+    """
     event_file = max(
         glob.glob(os.path.join(log_dir, "events.out.tfevents.*")),
         key=os.path.getctime,
     )
-    # Load the event file
     ea = EventAccumulator(event_file)
     ea.Reload()
 
-    # Extract the final validation loss and mAP
-    val_loss = ea.Scalars("csi_val/foc_loss")[-1].value
-    mAP = ea.Scalars(f"mAP/{test_name}")[-1].value
-    print(f"Final loss {val_loss}, mAP {mAP}")
+    val_loss_series = ea.Scalars("csi_val/foc_loss")
+    map_series = ea.Scalars(f"mAP/{test_name}")
 
-    return val_loss, mAP
+    def calc_slope(series, window):
+        if len(series) < 2:
+            return 0.0
+        window = min(window, len(series))
+        x = np.array([s.step for s in series[-window:]], dtype=float)
+        y = np.array([s.value for s in series[-window:]], dtype=float)
+        x_mean, y_mean = x.mean(), y.mean()
+        return ((x - x_mean) * (y - y_mean)).sum() / ((x - x_mean) ** 2).sum()
+
+    val_loss = val_loss_series[-1].value
+    val_loss_slope = calc_slope(val_loss_series, slope_window)
+    final_map = map_series[-1].value
+    map_slope = calc_slope(map_series, slope_window)
+
+    print(
+        f"val_loss={val_loss:.4f} (slope={val_loss_slope:+.4f}), "
+        f"mAP={final_map:.4f} (slope={map_slope:+.4f})"
+    )
+
+    return {
+        "val_loss": val_loss,
+        "val_loss_slope": val_loss_slope,
+        "map": final_map,
+        "map_slope": map_slope,
+    }
 
 
 if __name__ == "__main__":
@@ -201,18 +232,14 @@ if __name__ == "__main__":
                     + f"_mean_size{mean_size}"
                 )
                 log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-                final_val_loss, final_map = get_final_metrics_from_logs(
-                    log_path, test_name
+                metrics = get_final_metrics_from_logs(
+                    log_path, test_name, hp["early_stopping_patience"]
                 )
-                results["val_loss"].append(final_val_loss)
-                results["map"].append(final_map)
-            mean_loss = np.mean(results["val_loss"])
-            std_loss = np.std(results["val_loss"])
-            mean_map = np.mean(results["map"])
-            std_map = np.std(results["map"])
+                for key, value in metrics.items():
+                    results[key].append(value)
             all_results[hp_summary] = {
-                "val_loss": {"mean": mean_loss, "std": std_loss},
-                "map": {"mean": mean_map, "std": std_map},
+                key: {"mean": np.mean(vals), "std": np.std(vals)}
+                for key, vals in results.items()
             }
             results.clear()
             print(f"Results for {hp_summary}")
@@ -229,18 +256,14 @@ if __name__ == "__main__":
         for seed in seeds:
             hp_summary = f"m_per_class{m_per_class}"
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            final_val_loss, final_map = get_final_metrics_from_logs(
-                log_path, test_name
+            metrics = get_final_metrics_from_logs(
+                log_path, test_name, hp["early_stopping_patience"]
             )
-            results["val_loss"].append(final_val_loss)
-            results["map"].append(final_map)
-        mean_loss = np.mean(results["val_loss"])
-        std_loss = np.std(results["val_loss"])
-        mean_map = np.mean(results["map"])
-        std_map = np.std(results["map"])
+            for key, value in metrics.items():
+                results[key].append(value)
         all_results[hp_summary] = {
-            "val_loss": {"mean": mean_loss, "std": std_loss},
-            "map": {"mean": mean_map, "std": std_map},
+            key: {"mean": np.mean(vals), "std": np.std(vals)}
+            for key, vals in results.items()
         }
         results.clear()
         print(f"Results for {hp_summary}")
@@ -269,18 +292,14 @@ if __name__ == "__main__":
                 + f"_{roll_pitch_method}"
             )
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            final_val_loss, final_map = get_final_metrics_from_logs(
-                log_path, test_name
+            metrics = get_final_metrics_from_logs(
+                log_path, test_name, hp["early_stopping_patience"]
             )
-            results["val_loss"].append(final_val_loss)
-            results["map"].append(final_map)
-        mean_loss = np.mean(results["val_loss"])
-        std_loss = np.std(results["val_loss"])
-        mean_map = np.mean(results["map"])
-        std_map = np.std(results["map"])
+            for key, value in metrics.items():
+                results[key].append(value)
         all_results[hp_summary] = {
-            "val_loss": {"mean": mean_loss, "std": std_loss},
-            "map": {"mean": mean_map, "std": std_map},
+            key: {"mean": np.mean(vals), "std": np.std(vals)}
+            for key, vals in results.items()
         }
         results.clear()
         print(f"Results for {hp_summary}")
@@ -310,18 +329,14 @@ if __name__ == "__main__":
                 + f"CNTR_wt{center_weight}"
             )
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            final_val_loss, final_map = get_final_metrics_from_logs(
-                log_path, test_name
+            metrics = get_final_metrics_from_logs(
+                log_path, test_name, hp["early_stopping_patience"]
             )
-            results["val_loss"].append(final_val_loss)
-            results["map"].append(final_map)
-        mean_loss = np.mean(results["val_loss"])
-        std_loss = np.std(results["val_loss"])
-        mean_map = np.mean(results["map"])
-        std_map = np.std(results["map"])
+            for key, value in metrics.items():
+                results[key].append(value)
         all_results[hp_summary] = {
-            "val_loss": {"mean": mean_loss, "std": std_loss},
-            "map": {"mean": mean_map, "std": std_map},
+            key: {"mean": np.mean(vals), "std": np.std(vals)}
+            for key, vals in results.items()
         }
         results.clear()
         print(f"Results for {hp_summary}")
@@ -338,18 +353,14 @@ if __name__ == "__main__":
         for seed in seeds:
             hp_summary = f"lrate{learning_rate}"
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            final_val_loss, final_map = get_final_metrics_from_logs(
-                log_path, test_name
+            metrics = get_final_metrics_from_logs(
+                log_path, test_name, hp["early_stopping_patience"]
             )
-            results["val_loss"].append(final_val_loss)
-            results["map"].append(final_map)
-        mean_loss = np.mean(results["val_loss"])
-        std_loss = np.std(results["val_loss"])
-        mean_map = np.mean(results["map"])
-        std_map = np.std(results["map"])
+            for key, value in metrics.items():
+                results[key].append(value)
         all_results[hp_summary] = {
-            "val_loss": {"mean": mean_loss, "std": std_loss},
-            "map": {"mean": mean_map, "std": std_map},
+            key: {"mean": np.mean(vals), "std": np.std(vals)}
+            for key, vals in results.items()
         }
         results.clear()
         print(f"Results for {hp_summary}")
@@ -366,18 +377,14 @@ if __name__ == "__main__":
         for seed in seeds:
             hp_summary = f"lr_decay{lr_decay}"
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            final_val_loss, final_map = get_final_metrics_from_logs(
-                log_path, test_name
+            metrics = get_final_metrics_from_logs(
+                log_path, test_name, hp["early_stopping_patience"]
             )
-            results["val_loss"].append(final_val_loss)
-            results["map"].append(final_map)
-        mean_loss = np.mean(results["val_loss"])
-        std_loss = np.std(results["val_loss"])
-        mean_map = np.mean(results["map"])
-        std_map = np.std(results["map"])
+            for key, value in metrics.items():
+                results[key].append(value)
         all_results[hp_summary] = {
-            "val_loss": {"mean": mean_loss, "std": std_loss},
-            "map": {"mean": mean_map, "std": std_map},
+            key: {"mean": np.mean(vals), "std": np.std(vals)}
+            for key, vals in results.items()
         }
         results.clear()
         print(f"Results for {hp_summary}")
@@ -395,18 +402,14 @@ if __name__ == "__main__":
         for seed in seeds:
             hp_summary = "adam_betas" + "_".join([str(c) for c in adam_beta])
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            final_val_loss, final_map = get_final_metrics_from_logs(
-                log_path, test_name
+            metrics = get_final_metrics_from_logs(
+                log_path, test_name, hp["early_stopping_patience"]
             )
-            results["val_loss"].append(final_val_loss)
-            results["map"].append(final_map)
-        mean_loss = np.mean(results["val_loss"])
-        std_loss = np.std(results["val_loss"])
-        mean_map = np.mean(results["map"])
-        std_map = np.std(results["map"])
+            for key, value in metrics.items():
+                results[key].append(value)
         all_results[hp_summary] = {
-            "val_loss": {"mean": mean_loss, "std": std_loss},
-            "map": {"mean": mean_map, "std": std_map},
+            key: {"mean": np.mean(vals), "std": np.std(vals)}
+            for key, vals in results.items()
         }
         results.clear()
         print(f"Results for {hp_summary}")
@@ -416,8 +419,10 @@ if __name__ == "__main__":
     for hp_summary, result in all_results.items():
         print(f"\nExperiment: {hp_summary}")
         print(
-            f"  Validation Loss: mean = {result['val_loss']['mean']:.4f}, std = {result['val_loss']['std']:.4f}"
+            f"  val_loss: {result['val_loss']['mean']:.4f}±{result['val_loss']['std']:.4f}  "
+            f"(slope: {result['val_loss_slope']['mean']:+.4f})"
         )
         print(
-            f"  mAP: mean = {result['map']['mean']:.4f}, std = {result['map']['std']:.4f}"
+            f"  mAP:      {result['map']['mean']:.4f}±{result['map']['std']:.4f}  "
+            f"(slope: {result['map_slope']['mean']:+.4f})"
         )
