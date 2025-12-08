@@ -192,7 +192,7 @@ def main():
             )
 
     print("\n" + "=" * 70)
-    print("BEST EPOCHS BY AVERAGE mAP (all 3 testsets)")
+    print("BEST EPOCHS BY AVERAGE mAP (all testsets)")
     print("=" * 70)
 
     print(
