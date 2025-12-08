@@ -216,7 +216,47 @@ Launch training with:
 
 `python -m tools.train_prod training/covers80/ --runid='test of production training'`
 
-TensorBoard will show each fold as a separate run, but within a continuous progression of epochs. You can safely interrupt production training for any reason and re-launching it with the same command will resume from the last fold and checkpoint that was automatically saved by this script.
+You can safely interrupt production training for any reason and re-launching it with the same command will resume from the last fold and checkpoint that was automatically saved by this script.
+
+TensorBoard will show each fold as a separate run, but within a continuous progression of epochs. If you run a lot of epochs, identifying your best epochs in Tensorboard can be tedious. You may find it easier to interpret your results using this utility:
+
+`python -m tools.report_prod_logs training/covers80/logs --runid="test of production training"`
+
+Example output:
+```
+======================================================================
+BEST EPOCHS BY INDIVIDUAL TESTSET
+======================================================================
+
+reels50easy:
+  Rank  Fold           Epoch   mAP       Elapsed     
+  ---------------------------------------------------
+  1     v2prod_full    83      0.9449    29:00:10    
+  2     v2prod_full    76      0.9408    26:12:29    
+  3     v2prod_full    82      0.9379    28:36:17    
+
+reels50hard:
+  Rank  Fold           Epoch   mAP       Elapsed     
+  ---------------------------------------------------
+  1     v2prod_fold_5  65      0.7383    20:35:50    
+  2     v2prod_full    71      0.7367    24:11:15    
+  3     v2prod_full    80      0.7353    27:48:29    
+
+======================================================================
+BEST EPOCHS BY AVERAGE mAP (all 3 testsets)
+======================================================================
+
+  Rank  Fold           Epoch   Avg mAP   Elapsed     
+  ---------------------------------------------------
+  1     v2prod_full    83      0.8363    29:00:10    
+  2     v2prod_full    76      0.8354    26:12:29    
+  3     v2prod_full    80      0.8339    27:48:13    
+
+  Detail for v2prod_full epoch 83:
+    reels50easy: 0.9449
+    reels50hard: 0.7277
+```
+
 
 ## Generate Reference Embeddings
 
