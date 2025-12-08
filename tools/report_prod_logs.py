@@ -3,8 +3,8 @@
 """
 Analyze TensorBoard logs produced by tools/train_tune.py to report best epochs by mAP scores across k-fold training.
 
-Usage: python -m tools.analyze_tb_logs <logs_dir> --runid <runid>
-       e.g., python -m tools.analyze_tb_logs training/SHS100K/logs
+Usage: python -m tools.report_prod_logs <logs_dir> --runid <runid>
+       e.g., python -m tools.report_prod_logs training/SHS100K/logs --runid ver1.0
 
 Configuration: use TESTSETS below to define which testset names have the mAP scores.
 
@@ -153,11 +153,26 @@ def main():
         "logs_dir", help="Directory containing fold_* subdirectories"
     )
     parser.add_argument(
-        "--runid", required=True, help="Run ID used in train_prod/train_tune"
+        "--runid", required=True, help="Run ID used in train_prod"
     )
     args = parser.parse_args()
 
     all_data = load_all_folds(args.logs_dir, args.runid)
+
+    # Check which testsets were actually found
+    found_testsets = set(row[1] for row in all_data)
+    missing_testsets = set(TESTSETS) - found_testsets
+    if missing_testsets:
+        print(
+            f"\nWarning: No data found for testsets: {', '.join(sorted(missing_testsets))}"
+        )
+    if not found_testsets:
+        print(f"Error: No mAP data found for any testsets in {args.logs_dir}")
+        sys.exit(1)
+
+    # Calculate fold column width from actual data
+    fold_names = set(row[0] for row in all_data)
+    fold_width = max(len(name) for name in fold_names) + 2
 
     print("\n" + "=" * 70)
     print("BEST EPOCHS BY INDIVIDUAL TESTSET")
@@ -165,27 +180,29 @@ def main():
 
     for testset in TESTSETS:
         print(f"\n{testset}:")
+
         print(
-            f"  {'Rank':<6}{'Fold':<10}{'Epoch':<8}{'mAP':<10}{'Elapsed':<12}"
+            f"  {'Rank':<6}{'Fold':<{fold_width}}{'Epoch':<8}{'mAP':<10}{'Elapsed':<12}"
         )
-        print(f"  {'-'*46}")
+        print(f"  {'-'*(36 + fold_width)}")
         top = get_top_by_testset(all_data, testset)
         for i, (fold, epoch, val, elapsed) in enumerate(top, 1):
             print(
-                f"  {i:<6}{fold:<10}{epoch:<8}{val:<10.4f}{format_time(elapsed):<12}"
+                f"  {i:<6}{fold:<{fold_width}}{epoch:<8}{val:<10.4f}{format_time(elapsed):<12}"
             )
 
     print("\n" + "=" * 70)
     print("BEST EPOCHS BY AVERAGE mAP (all 3 testsets)")
     print("=" * 70)
+
     print(
-        f"\n  {'Rank':<6}{'Fold':<10}{'Epoch':<8}{'Avg mAP':<10}{'Elapsed':<12}"
+        f"\n  {'Rank':<6}{'Fold':<{fold_width}}{'Epoch':<8}{'Avg mAP':<10}{'Elapsed':<12}"
     )
-    print(f"  {'-'*46}")
+    print(f"  {'-'*(36 + fold_width)}")
     top_avg = get_top_by_avg(all_data)
     for i, (fold, epoch, avg, elapsed, values) in enumerate(top_avg, 1):
         print(
-            f"  {i:<6}{fold:<10}{epoch:<8}{avg:<10.4f}{format_time(elapsed):<12}"
+            f"  {i:<6}{fold:<{fold_width}}{epoch:<8}{avg:<10.4f}{format_time(elapsed):<12}"
         )
 
     # Detail for best overall epoch
