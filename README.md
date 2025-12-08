@@ -218,11 +218,11 @@ Launch training with:
 
 You can safely interrupt production training for any reason and re-launching it with the same command will resume from the last fold and checkpoint that was automatically saved by this script.
 
-TensorBoard will show each fold as a separate run, but within a continuous progression of epochs. If you run a lot of epochs, identifying your best epochs in Tensorboard can be tedious. You may find it easier to interpret your results using this utility:
+TensorBoard will show each fold as a separate run, but within a continuous progression of epochs. If you run a lot of epochs, identifying your best epochs in Tensorboard can be tedious. You may find it easier to interpret your results using the `report_prod_logs` utility. First edit the TESTSETS line near the top of the script to define which testsets you want to report on. Then run:
 
 `python -m tools.report_prod_logs training/covers80/logs --runid="test of production training"`
 
-Example output:
+Example output for an early irishtune.info production run which used testsets reels50easy and reels50hard:
 ```
 ======================================================================
 BEST EPOCHS BY INDIVIDUAL TESTSET
