@@ -65,6 +65,9 @@ Follow the example of the prepared Covers80 dataset included with the original C
 
 Background explanation: Covers80 is a small, widely used dataset of modern, Western pop music intended only for benchmarking purposes, so that the accuracy of different approaches to solving the problem of CSI can be compared against each other. It is far too small to be useful for neural-network training, but it is a rare example of a published, stable collection of audio files. This makes it easy for you to get started, so you can confirm you have a working setup of this project without having to have your own set of audio files and their metadata ready. You might even end up using Covers80 yourself as a benchmarking test to see how well your own training project handles modern, Western pop music in comparison to published Covers80 benchmarks from other CSI projects.
 
+This project includes a utility to identify work and performance data overlap (sometimes considered "data leakage") between datasets, for example between training and test datasets:
+`python -m tools.compare_datasets data/covers80/dataset.txt data/SHS100K/train.txt`
+
 ## Feature Extraction
 
 You must run this before proceeding to the Train step. And you can't run this without first doing the Data Preparation step above. See "Input and Output Files" below for more information about what happens here. In summary, this step generates some data augmentation - artificial variants of the real music you provide that help the neural network generalize across the various ways that humans might perform any musical work -, converts all of that audio (original and artificial) to CQT arrays (basically a type of spectrogram), and does some plain old data wrangling to prepare the metadata that the training script will need. 
