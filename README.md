@@ -243,7 +243,7 @@ reels50hard:
   3     v2prod_full    80      0.7353    27:48:29    
 
 ======================================================================
-BEST EPOCHS BY AVERAGE mAP (all 3 testsets)
+BEST EPOCHS BY AVERAGE mAP (all testsets)
 ======================================================================
 
   Rank  Fold           Epoch   Avg mAP   Elapsed     
