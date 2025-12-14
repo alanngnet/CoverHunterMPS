@@ -93,8 +93,8 @@ Note: Don't use the `torchrun` launch command offered in original CoverHunter. A
 The original CoverHunter project included a prepared configuration to run a training session on the Covers80 dataset, and this is now located in the 'training/covers80' subfolder of this project. See the "Background explanation" above in the Data Preparation section about what to expect from using Covers80 for training. In particular, their test configuration used the same dataset for both training and validation, so results looked fabulously accurate and were essentially meaningless except that you could confirm that your setup is working. This fork added a train/validate/test data-splitting function in the extract_csi_features tool, along with corresponding new data-preparation hyperparameters, so you can choose to try more realistic training - in which the model validates its learning against data it has not seen before - even if you only have Covers80 data to play with.
 
 You may need to edit the training hyperparameters in the `hparams.yaml` configuration file in the folder `training/covers80/config` before starting a training run. For example:
-* To skip the step of also setting up covers80 not only as your training data but also in its normal use as your covers80 testset, just comment out the 4 `covers80` lines of your `hparams.yaml`. If you do want to see the surreal perfection of covers80 training vs covers80 testset, then follow the instructions in step 2 of the Evaluation section below to create your `data/covers80_testset/full.txt` file.
-* Or configure the `testset` lines to point to any other testset(s) you like, for example the other testsets cited in the original CoverHunter paper, or the Irish traditional ones published at https://www.irishtune.info/public/MLdata.htm . See [Training Hyperparameters](https://github.com/alanngnet/CoverHunterMPS#data-sources) for details. 
+* To skip the step of also setting up covers80 not only as your training data but also in its normal use as your covers80 test set, just comment out the 4 `covers80` lines of your `hparams.yaml`. If you do want to see the surreal perfection of covers80 training vs covers80 test set, then follow the instructions in step 2 of the Evaluation section below to create your `data/covers80_testset/full.txt` file.
+* Or configure the `testset` lines to point to any other test set(s) you like, for example the other test sets cited in the original CoverHunter paper, or the Irish traditional ones published at https://www.irishtune.info/public/MLdata.htm . See [Training Hyperparameters](https://github.com/alanngnet/CoverHunterMPS#data-sources) for details. 
 * If you run into memory limits, start with decreasing the batch size from 64 to 32.
 
 The one required command-line parameter for the training script is to specify the path where the training hyperparameters are available and where the model output will go, like this:
@@ -109,13 +109,33 @@ To see the TensorBoard live visualization of the model's progress during trainin
 
 `tensorboard --logdir=training/covers80/logs`
 
+## Test Sets / Benchmarks
+
+To add more benchmarking test sets to your project for use in training or evaluation:
+1. The test set must be prepared as a CoverHunter-compatible dataset:
+    * In addition to the source audio files, locate or create the necessary `dataset.txt` file that includes the work-performance relationship metadata that `extract_csi_features.py` needs.
+    * Run your test set through `extract_csi_features.py`. In the `hparams.yaml` file for the feature extraction, turn off all augmentation. See data/covers80_testset/hparams.yaml for an example configuration to treat Covers80 as the query data:
+    ```
+    python3 -m tools.extract_csi_features data/covers80_testset
+    ```
+   * The important output from that is `full.txt` and the `cqt_feat` subfolder's contents, which are referred to as path names in the `full.txt` file. 
+2. The name of the test set must be included in `src/trainer.py` in the `ALL_TEST_SETS` configuration line near the top of that script. In the following steps, let's use the example test set name `your_new_testset`.
+3. To use the test set in training, add these lines in your `training/[projectname]/config/hparams.yaml` and - if you use the `train_prod.py` script - also the `training/[projectname]/config/hparams_prod.yaml` file:
+    ```
+    your_new_testset:
+      query_path: "data/your_new_testset/full.txt"
+      ref_path: "data/your_new_testset/full.txt"
+      every_n_epoch_to_test: 1
+    ```
+4. If you use the `train_tune.py` script, you might decide that this new test set is the one you want summary mAP analytics for, in which case set the `test_name` hyperparameter in   `training/[projectname]/config/hp_tuning.yaml` to match the `your_new_testset` name from step 2 above.
+
 ## Hyperparameter Tuning
 
 After you use the tools.train script to confirm your data is usable with CoverHunterMPS, and perhaps to do some basic experimentation, you may be motivated to experiment with a wide range of training hyperparameters to discover the optimal settings for your data that will lead you to better training metrics. You should be able to use your knowledge of its unique musical characteristics to make some educated guesses on how to diverge from the default CoverHunter hyperparameters, which were optimized for Western pop music.
 
-Step 1: Study the explanations in the Training Hyperparameters section below to make some hypotheses about alternative hyperparameter values to try with your data. *Tip for deep learning newbies*: A good AI assistant can help greatly with hyperparameter tuning advice. Give it this project's files, detailed descriptions of your dataset, the hyperparameters you've tried and their results, and even perhaps the corresponding screenshots of your resulting Tensorboard validation loss and testset mAP metrics. Then ask it for advice on what to try next.
+Step 1: Study the explanations in the Training Hyperparameters section below to make some hypotheses about alternative hyperparameter values to try with your data. *Tip for deep learning newbies*: A good AI assistant can help greatly with hyperparameter tuning advice. Give it this project's files, detailed descriptions of your dataset, the hyperparameters you've tried and their results, and even perhaps the corresponding screenshots of your resulting Tensorboard validation loss and test set mAP metrics. Then ask it for advice on what to try next.
 
-Step 2: Add your hypotheses as specific hyperparameter values to try in the hp_tuning.yaml file in the model's training folder, following the comments and examples there. 
+Step 2: Add your hypotheses as specific hyperparameter values to try in the `hp_tuning.yaml` file in the model's training folder, following the comments and examples there. 
 
 Step 3: Launch training with `model_dir` as the one required parameter:
 
@@ -161,8 +181,7 @@ This script evaluates your trained model by providing standard mAP (mean average
         KeyError: 'foc'
         ```
         4. Note that the above Google Drive-hosted file belongs to Liu Feng, the CoverHunter repo owner, and nobody on the CoverHunterMPS project has any control of it.
-3. Run your testset aka query data through `extract_csi_features.py`. In the `hparams.yaml` file for the feature extraction, turn off all augmentation. See `data/covers80_testset/hparams.yaml` for an example configuration to treat covers80 as the query data:<br> `python3 -m tools.extract_csi_features data/covers80_testset`<br>
-The important output from that is `full.txt` and the `cqt_feat` subfolder's contents.
+3. Have your desired test set read - see the Test Sets section above.
 4. Run the evaluation script.
     - Example if you trained your own quick testing model using covers80 as your training data and you want to try out all the optional features I added to `eval_testset.py` in this fork:<br>
 `python3 -m tools.eval_testset training/covers80 data/covers80_testset/full.txt data/covers80_testset/full.txt -plot_name="training/covers80/tSNE.png" -dist_name='distmatrix' -test_only_labels='data/covers80/test-only-work-ids.txt' --reuse-embeddings`
@@ -179,12 +198,12 @@ Path to a folder that contains:
 - A subfolder `checkpoints` that contains the `g_00000NNN` file from your best training epoch (epoch NNN). If there are multiple such checkpoint files in this subfolder, the highest-numbered one will be used.
 
 #### query_path
-Path to the `full.txt` file containing the metadata for the pre-processed audio samples you want to challenge your model with in this test, also known as your test dataset or testset. For example, if you want to test a pre-trained model against Covers80 benchmarks, then you would specify the `full.txt` file generated from step 2 in the example above.
+Path to the `full.txt` file containing the metadata for the pre-processed audio samples you want to challenge your model with in this test, also known as your benchmarking dataset or test set. For example, if you want to test a pre-trained model against Covers80 benchmarks, then you would specify the `full.txt` file generated from step 2 in the example above.
 
 #### ref_path
-Also a path to a `full.txt` file. Which file depends on whether your testset comes from the same musical repertoire as your training data or not. 
-- If you want to test how well your model performs in your targeted musical culture (the one you used as training data), and the testset uses the same `work_id` to identify works as the `work_id` used in your reference data - which would only be possible if they're from the same target musical culture - then specify the `full.txt` file containing the metadata for all the works your model claims familiarity with. Then this script will measure how well your model is able to correctly identify the work_id for each performance in the testset.
-- Whereas if you want to test how well your model can handle a completely foreign testset, with no real-world relationship at all between `work_id` as used in your own model's data to the `work_id` assigned in the testset, then specify the exact same `full.txt` path as you provided for `query_path`. In this case this script will test how well your model is able to assign the correct work to each performance in the testset, defined simply by the `work_id` provided in this `full.txt` file.
+Also a path to a `full.txt` file. Which file depends on whether your benchmarking test set comes from the same musical repertoire as your training data or not. 
+- If you want to test how well your model performs in your targeted musical culture (the one you used as training data), and the test set uses the same `work_id` to identify works as the `work_id` used in your reference data - which would only be possible if they're from the same target musical culture - then specify the `full.txt` file containing the metadata for all the works your model claims familiarity with. Then this script will measure how well your model is able to correctly identify the work_id for each performance in the test set.
+- Whereas if you want to test how well your model can handle a completely foreign test set, with no real-world relationship at all between `work_id` as used in your own model's data to the `work_id` assigned in the test set, then specify the exact same `full.txt` path as you provided for `query_path`. In this case this script will test how well your model is able to assign the correct work to each performance in the test set, defined simply by the `work_id` provided in this `full.txt` file.
 
 #### query_in_ref_path
 Optional. Path to your `query_in_ref.txt` file. This parameter that is only relevant if `query_path` and `ref_path` are not identical files. See the "query_in_ref" heading below under "Input and Output Files." You can use the `tools.make_query_in_ref` utility to automatically generate the `query_in_ref.txt` file after specifying your query and ref files at the top of that script.
@@ -205,7 +224,7 @@ The optional `dist_name` argument is a path where you want to save the distance 
 The default value for the optional `marks` argument is 'markers', which makes the output for `plot_name` differentiate works by using using standard matplotlib markers in various colors and shapes. The alternative value is 'ids' which uses the `work_id` numbers defined by extract_csi_features instead of matplotlib markers.
 
 #### reuse-embeddings
-Optional flag to activate this script's original default behavior of re-using any existing embeddings in the temporary embeddings folder created by and for this script's use. Use this **only** if you are certain that none of the testset data and none of the hyperparameters have changed since the existing embeddings were generated, otherwise the metrics from this script will be misleading. The reason to use it in that case would be for very large testsets where reducing evaluation compute time for repeated evaluations is a consideration.
+Optional flag to activate this script's original default behavior of re-using any existing embeddings in the temporary embeddings folder created by and for this script's use. Use this **only** if you are certain that none of the tests et data and none of the hyperparameters have changed since the existing embeddings were generated, otherwise the metrics from this script will be misleading. The reason to use it in that case would be for very large test sets where reducing evaluation compute time for repeated evaluations is a consideration.
 
 ## Production Training
 
@@ -221,14 +240,14 @@ Launch training with:
 
 You can safely interrupt production training for any reason and re-launching it with the same command will resume from the last fold and checkpoint that was automatically saved by this script.
 
-TensorBoard will show each fold as a separate run, but within a continuous progression of epochs. If you run a lot of epochs, identifying your best epochs in Tensorboard can be tedious. You may find it easier to interpret your results using the `report_prod_logs` utility. First edit the TESTSETS line near the top of the script to define which testsets you want to report on. Then run:
+TensorBoard will show each fold as a separate run, but within a continuous progression of epochs. If you run a lot of epochs, identifying your best epochs in Tensorboard can be tedious. You may find it easier to interpret your results using the `report_prod_logs` utility. First edit the TESTSETS line near the top of the script to define which test sets you want to report on. Then run:
 
 `python -m tools.report_prod_logs training/covers80/logs --runid="test of production training"`
 
-Example output for an early irishtune.info production run which used testsets reels50easy and reels50hard:
+Example output for an early irishtune.info production run which used test sets reels50easy and reels50hard:
 ```
 ======================================================================
-BEST EPOCHS BY INDIVIDUAL TESTSET
+BEST EPOCHS BY INDIVIDUAL TEST SET
 ======================================================================
 
 reels50easy:
@@ -246,7 +265,7 @@ reels50hard:
   3     v2prod_full    80      0.7353    27:48:29    
 
 ======================================================================
-BEST EPOCHS BY AVERAGE mAP (all testsets)
+BEST EPOCHS BY AVERAGE mAP (all test sets)
 ======================================================================
 
   Rank  Fold           Epoch   Avg mAP   Elapsed     
@@ -355,7 +374,7 @@ The hparams.yaml file located in the "config" subfolder of the path you provide 
 
 | key | value |
 | --- | --- |
-| covers80:<br> &nbsp; query_path<br> &nbsp; ref_path<br> &nbsp; every_n_epoch_to_test | Test dataset(s) used for automated model evaluation purposes during training. "covers80" was the only example provided with the original CoverHunter. For an example of a different culture's test set, see https://www.irishtune.info/public/MLdata.htm. Note that ref_path and query_path are set to the same data in order to do a self-similarity evaluation, testing how well the model can cluster samples (perfs) relative to their known classes (works). You can add as many test datasets as you want. Each will be displayed as separate results in the TensorBoard visualization during training.<br><br>New testsets must be added to the `src/trainer.py` script in the list where `ALL_TEST_SETS` is defined.<br><br>Subparameters for covers80:<br>`query_path`: "data/covers80/full.txt"<br>`ref_path`: "data/covers80/full.txt"<br>`every_n_epoch_to_test`: How many epochs to wait between each test of the current model against this testset. |
+| covers80:<br> &nbsp; query_path<br> &nbsp; ref_path<br> &nbsp; every_n_epoch_to_test | Test dataset(s) used for automated model evaluation purposes during training. "covers80" was the only example provided with the original CoverHunter. For an example of a different culture's test set, see https://www.irishtune.info/public/MLdata.htm. Note that ref_path and query_path are set to the same data in order to do a self-similarity evaluation, testing how well the model can cluster samples (perfs) relative to their known classes (works). You can add as many test datasets as you want. Each will be displayed as separate results in the TensorBoard visualization during training.<br><br>New test sets must be added to the `src/trainer.py` script in the list where `ALL_TEST_SETS` is defined.<br><br>Subparameters for covers80:<br>`query_path`: "data/covers80/full.txt"<br>`ref_path`: "data/covers80/full.txt"<br>`every_n_epoch_to_test`: How many epochs to wait between each test of the current model against this test set. |
 | test_path | Compare `train_path` and `val_path`. This dataset is used in each epoch to run the same validation calculation as with the `val_path`. Presumably one should include both classes and samples that were excluded from both `train_path` and `val_path`. |
 | train_path | path to a JSON file containing metadata about the data to be used for model training (See full.txt below for details) |
 | val_path | Path to a JSON file containing metadata about the data to be used for model validation. Compare `test_path` above. Presumably one should include a balanced distribution of samples that are *not* included in the `train_path` dataset, but do include samples for the classes represented in the `train_path` dataset. (See full.txt below for details) |
