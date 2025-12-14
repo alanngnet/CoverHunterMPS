@@ -6,7 +6,7 @@ Analyze TensorBoard logs produced by tools/train_tune.py to report best epochs b
 Usage: python -m tools.report_prod_logs <logs_dir> --runid <runid>
        e.g., python -m tools.report_prod_logs training/SHS100K/logs --runid ver1.0
 
-Configuration: use TESTSETS below to define which testset names have the mAP scores.
+Configuration: use TESTSETS below to define which test set names have the mAP scores.
 
 Created on Mon Dec 8 08:20:39 2025
 @author: alanngnet and Claude Opus 4.5
@@ -116,14 +116,14 @@ def format_time(seconds):
 
 
 def get_top_by_testset(all_data, testset, n=3):
-    """Get top n entries for a single testset."""
+    """Get top n entries for a single test set."""
     filtered = [(f, e, v, t) for f, ts, e, v, t in all_data if ts == testset]
     filtered.sort(key=lambda x: x[2], reverse=True)  # sort by value
     return filtered[:n]
 
 
 def get_top_by_avg(all_data, n=3):
-    """Get top n entries by average mAP across all testsets."""
+    """Get top n entries by average mAP across all test sets."""
     # Group by (fold, epoch)
     grouped = {}
     for fold, testset, epoch, value, elapsed in all_data:
@@ -132,7 +132,7 @@ def get_top_by_avg(all_data, n=3):
             grouped[key] = {"values": {}, "elapsed": elapsed}
         grouped[key]["values"][testset] = value
 
-    # Calculate averages for entries with all testsets
+    # Calculate averages for entries with all test sets
     avg_scores = []
     for (fold, epoch), info in grouped.items():
         if len(info["values"]) == len(TESTSETS):
@@ -159,15 +159,15 @@ def main():
 
     all_data = load_all_folds(args.logs_dir, args.runid)
 
-    # Check which testsets were actually found
+    # Check which test sets were actually found
     found_testsets = set(row[1] for row in all_data)
     missing_testsets = set(TESTSETS) - found_testsets
     if missing_testsets:
         print(
-            f"\nWarning: No data found for testsets: {', '.join(sorted(missing_testsets))}"
+            f"\nWarning: No data found for test sets: {', '.join(sorted(missing_testsets))}"
         )
     if not found_testsets:
-        print(f"Error: No mAP data found for any testsets in {args.logs_dir}")
+        print(f"Error: No mAP data found for any test sets in {args.logs_dir}")
         sys.exit(1)
 
     # Calculate fold column width from actual data
@@ -175,7 +175,7 @@ def main():
     fold_width = max(len(name) for name in fold_names) + 2
 
     print("\n" + "=" * 70)
-    print("BEST EPOCHS BY INDIVIDUAL TESTSET")
+    print("BEST EPOCHS BY INDIVIDUAL TEST SET")
     print("=" * 70)
 
     for testset in TESTSETS:
