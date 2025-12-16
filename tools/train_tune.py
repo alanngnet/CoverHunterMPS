@@ -176,6 +176,7 @@ if __name__ == "__main__":
     # ensure at least one mean_size
     mean_sizes = experiments.get("mean_sizes", [hp["mean_size"]])
     m_per_classes = experiments["m_per_classes"]
+    num_blockss = experiments["num_blockss"]
     spec_augmentations = experiments["spec_augmentations"]
     losses = experiments["losses"]
     learning_rates = experiments["learning_rates"]
@@ -255,6 +256,30 @@ if __name__ == "__main__":
         hp["m_per_class"] = m_per_class
         for seed in seeds:
             hp_summary = f"m_per_class{m_per_class}"
+            log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
+            metrics = get_final_metrics_from_logs(
+                log_path, test_name, hp["early_stopping_patience"]
+            )
+            for key, value in metrics.items():
+                results[key].append(value)
+        all_results[hp_summary] = {
+            key: {"mean": np.mean(vals), "std": np.std(vals)}
+            for key, vals in results.items()
+        }
+        results.clear()
+        print(f"Results for {hp_summary}")
+        pprint.pprint(all_results[hp_summary])
+
+    # num_blocks experiments
+    hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
+    hp["every_n_epoch_to_save"] = 100
+    hp["early_stopping_patience"] = experiments["early_stopping_patience"]
+    hp["max_epochs"] = experiments.get("max_epochs", 15)
+    results = defaultdict(list)
+    for num_blocks in num_blockss:
+        hp["encoder"]["num_blocks"] = num_blocks
+        for seed in seeds:
+            hp_summary = f"num_blocks{num_blocks}"
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
             metrics = get_final_metrics_from_logs(
                 log_path, test_name, hp["early_stopping_patience"]

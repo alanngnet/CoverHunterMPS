@@ -43,6 +43,10 @@ mean_sizes: [3]
 m_per_classes: [4,8]
 m_per_classes: []
 
+# num_blockss as plural of num_blocks
+num_blockss: [3,4]
+num_blockss: []
+
 spec_augmentations:
     - random_erase:
         prob: 0.5
