@@ -1,38 +1,68 @@
 #!/usr/bin/env python3
 """
-Created on Wed May 22 19:27:14 2024
-@author: Alan Ng
+Production training with stratified K-fold cross-validation.
 
-Command-line utility to train a production-ready model by learning all
-available works and perfs. Uses a stratified K-fold split to handle realistic
-data distributions in CSI data sets.
+Trains a production-ready model on the complete dataset using stratified K-fold
+cross-validation to handle realistic class imbalance in CSI datasets. Concludes
+with a final training run on the full dataset.
 
-Expects hyperparameters in a hparams_prod.yaml file which expects all the same
-hyperparameters as documented for the training hparams.yaml, except:
+Early Stopping Modes
+--------------------
+Controlled by hp["early_stop_metric"] (inherits from Trainer):
 
-    Set train_path to point to your full dataset, such as the full.txt output 
-    from tools/extract_csi_features.py
-    
-    val_path will be ignored, since validation sets will be generated for each
-    fold from the train_path dataset.
-    
-    test_path will only be used during the final full-dataset training run,
-    as its validation set.
-    
-    You may also specify one or more external testsets, which will be used
-    normally during training for Tensorboard display.
+"val_loss" (default):
+    Stop each fold when validation loss plateaus. Checkpoint selection uses
+    retrospective mAP peak detection via TensorBoard log parsing. All testsets
+    remain uncontaminated.
 
-    Set a lower early_stopping_patience than you used in research mode to avoid 
-    overfitting in each fold.
-    
-    See additional hyperparameters described in hparams_prod.yaml in the section
-    "Training parameters only used by train_prod"
+"mAP":
+    Stop each fold when smoothed mAP plateaus on hp["map_stopping_testsets"].
+    Checkpoint selection uses Trainer's tracked best_raw_map_epoch directly.
+    Testsets not in map_stopping_testsets are benchmark-only (logged but
+    never influence training), preserving research-grade separation.
+
+For production deployment where benchmark purity is not required, set
+map_stopping_testsets to include all available testsets for maximum mAP
+optimization.
+
+Hyperparameters (hparams_prod.yaml)
+-----------------------------------
+Expects all standard hparams.yaml parameters plus:
+
+    train_path: path to full.txt from extract_csi_features.py
+    val_path: Ignored (validation sets generated per fold)
+    test_path: Used only for final full-dataset training run as the validation set
+
+    early_stop_metric: "val_loss" or "mAP"
+    map_stopping_testsets: List of testsets for mAP-based stopping
+    map_stopping_patience: Epochs without improvement (mAP mode)
+    map_smoothing_alpha: EMA weight for mAP smoothing
+
+    k_folds: Number of cross-validation folds
+    early_stopping_patience: Patience for fold training (shorter than research)
+        Set a lower early_stopping_patience than you likely used in experiments,
+        to avoidoverfitting in each fold.
+
+    final_early_stopping_patience: Optional longer patience for final run
+    fold_lr_decay: Learning rate decay for folds after the first
+    final_lr_decay: Learning rate decay for final full-dataset run
+    full_dataset_lr_boost: LR boost factor for final run
+
 
 Example launch command:
-python -m tools.train_prod training/yourdata
+    python -m tools.train_prod training/yourdata --runid='prod_v1'
 
-The required model_dir parameter is the relative path where this script
-creates a subfolder "prod_checkpoints" containing checkpoint files.
+Output
+------
+    training/yourdata/prod_checkpoints/: Model checkpoint files
+    training/yourdata/logs/{runid}_fold_N/: TensorBoard logs per fold
+    training/yourdata/logs/{runid}_full/: TensorBoard logs for final run
+
+Legacy Support
+--------------
+The module constant MAP_TESTSETS provides backward compatibility when
+hp["map_stopping_testsets"] is not specified. New configurations should
+use the hyperparameter instead.
 
 Optionally specify in MAP_TESTSETS which testsets to use to define peak mAP.
 Add or remove from this list based on your relevant testsets.
@@ -42,8 +72,17 @@ to return to before starting the next fold. Note: Setting testsets here does
 mean that checkpoint data for epochs after the best epoch in each fold
 will be deleted.
 
+Created on Wed May 22 19:27:14 2024
+@author: Alan Ng
+
 """
 
+# Kept for backward compatibility when map_stopping_testsets not specified
+# When early_stop_metric="val_loss": These testsets are used for retrospective
+# peak mAP detection via TensorBoard log parsing after each fold.
+#
+# When early_stop_metric="mAP": This constant is ignored; Trainer uses
+# hp["map_stopping_testsets"] directly for live stopping decisions.
 MAP_TESTSETS = ["reels50easy", "reels50hard", "reels50transpose"]
 
 import argparse
@@ -119,7 +158,16 @@ def get_map_from_logs(log_dir, testset_name, epoch):
 
 def get_average_map_for_epoch(log_dir, testsets, epoch):
     """
-    Calculate average mAP across all specified testsets for a given epoch
+    Calculate average mAP across all specified testsets for a given epoch.
+
+    Helper for find_peak_map_epoch(). Reads mAP values from TensorBoard
+    event files and returns their arithmetic mean.
+
+    Note:
+    Uses arithmetic mean for aggregation. For alternative strategies
+    (weighted, min), modify Trainer.aggregate_stopping_map_scores()
+    when using mAP-based early stopping instead of this log-parsing path.
+
     """
     maps = []
     for testset in testsets:
@@ -136,11 +184,26 @@ def find_peak_map_epoch(
     """
     Find the epoch with highest average mAP within the early stopping window
 
+    Used for retrospective checkpoint selection when early_stop_metric="val_loss".
+    When early_stop_metric="mAP", Trainer tracks best_raw_map_epoch directly
+    and this function serves only as a fallback.
+
     Args:
         log_dir: Directory containing tensorboard logs
         testsets: List of testset names to check
         current_epoch: The epoch at which training stopped
         early_stopping_window: Number of epochs to look back
+
+    Returns:
+        int or None: Epoch number with highest average mAP within the window,
+        or None if no mAP data found.
+
+    Note:
+        This function parses TensorBoard logs after training completes,
+        which requires a brief sleep for filesystem sync. The mAP-based
+        early stopping mode in Trainer avoids this latency by tracking
+        the best epoch during training.
+
     """
     event_files = sorted(
         [f for f in os.listdir(log_dir) if "events.out.tfevents" in f],
@@ -204,9 +267,66 @@ def cross_validate(
     hp, model_class, device, checkpoint_dir, model_dir, run_id, n_splits=5
 ):
     """
-    Perform k-fold cross-validation to train on entire dataset
-    for production use.
+    Perform stratified K-fold cross-validation for production model training.
+
+    Trains the model across K folds to ensure exposure to all works and
+    performances, then concludes with a final training run on the complete
+    dataset. Each fold uses early stopping and checkpoint selection based
+    on hp["early_stop_metric"].
+
+    Args:
+        hp: dict
+            Hyperparameters including early stopping configuration.
+        model_class: class
+            Model class to instantiate (typically src.model.Model).
+        device: torch.device
+            Computation device (mps, cuda).
+        checkpoint_dir: str
+            Directory for saving model checkpoints (shared across folds).
+        model_dir: str
+            Base directory for the training run.
+        run_id: str
+            Identifier for TensorBoard log subdirectories.
+        n_splits: int
+            Number of cross-validation folds (default: 5).
+
+    Returns:
+        list[dict]: Results for each fold and final run, containing:
+            - "fold": Fold number or "full" for final run
+            - "best_validation_loss": Lowest validation loss achieved
+
+    Checkpoint Selection
+    --------------------
+    After each fold completes:
+
+    If early_stop_metric="mAP" and Trainer tracked best_raw_map_epoch:
+        Uses Trainer's live-tracked peak mAP epoch directly.
+
+    If early_stop_metric="val_loss" with testsets available:
+        Falls back to retrospective log parsing via find_peak_map_epoch().
+
+    Otherwise:
+        Uses the final checkpoint from early stopping.
+
+    Checkpoints after the selected best epoch are cleaned up to save disk
+    space and ensure the best model is used for subsequent folds.
+
+    Learning Rate Strategy
+    ----------------------
+    Folds after the first use progressively lower learning rates, linearly
+    interpolated from hp["lr_initial"] to hp["min_lr"]. This prevents
+    catastrophic forgetting of patterns learned in earlier folds.
+
+    The final full-dataset run uses hp["full_dataset_lr_boost"] to set
+    a learning rate slightly above the minimum.
+
+    Resumption
+    ----------
+    Training can be interrupted and resumed safely. The function tracks
+    completed folds via marker files (fold_N_started.txt, active_fold.txt)
+    and skips already-completed folds on restart.
     """
+
     logger = create_logger()
 
     # Read data lines from the original file
@@ -330,18 +450,30 @@ def cross_validate(
         # After trainer.train() completes for each fold:
         trainer.summary_writer.flush()
         trainer.summary_writer.close()
-        time.sleep(1)  # give OS time to save log file
-        best_epoch = find_peak_map_epoch(
-            log_path,
-            available_testsets,
-            trainer.epoch,  # Current epoch when training stopped
-            hp["early_stopping_patience"] + 1,  # Look back this many epochs
-        )
-        if best_epoch is not None:
-            logger.info(f"Peak average mAP achieved at epoch {best_epoch}")
-            cleanup_checkpoints(checkpoint_dir, best_epoch)
-        else:
-            logger.warning("Could not determine peak mAP epoch")
+
+        # Use Trainer's tracked best epoch when in mAP mode
+        if (
+            hp.get("early_stop_metric") == "mAP"
+            and trainer.best_raw_map_epoch is not None
+        ):
+            logger.info(
+                f"Peak mAP {trainer.best_raw_map:.4f} at epoch {trainer.best_raw_map_epoch}"
+            )
+            cleanup_checkpoints(checkpoint_dir, trainer.best_raw_map_epoch)
+        elif available_testsets:
+            # Fallback to log parsing for val_loss mode with testsets
+            time.sleep(1)
+            best_epoch = find_peak_map_epoch(
+                log_path,
+                available_testsets,
+                trainer.epoch,
+                hp["early_stopping_patience"] + 1,
+            )
+            if best_epoch is not None:
+                logger.info(f"Peak mAP achieved at epoch {best_epoch}")
+                cleanup_checkpoints(checkpoint_dir, best_epoch)
+            else:
+                logger.warning("Could not determine peak mAP epoch")
 
         fold_results.append(
             {
@@ -478,16 +610,27 @@ def _main() -> None:
             sys.exit()
 
     # Validate testset specifications
-    available_testsets = [t for t in MAP_TESTSETS if t in hp]
-    if not available_testsets:
-        logger.warning(
-            "None of the specified MAP_TESTSETS found in hyperparameters. "
-            "The last checkpoint after early stopping will be used instead."
-        )
+    # Determine stopping testsets: prefer hp config, fall back to module constant
+    if "map_stopping_testsets" in hp:
+        available_testsets = [
+            t for t in hp["map_stopping_testsets"] if t in hp
+        ]
+        if not available_testsets:
+            logger.warning(
+                "map_stopping_testsets specified but none found in hyperparameters. "
+                "Check that each testset name has a matching configuration block. "
+                "Falling back to val_loss early stopping."
+            )
     else:
-        logger.info(
-            f"Using testsets for peak mAP tracking: {available_testsets}"
-        )
+        available_testsets = [t for t in MAP_TESTSETS if t in hp]
+        if not available_testsets:
+            logger.info(
+                "No map_stopping_testsets configured and no MAP_TESTSETS found. "
+                "Using val_loss for early stopping."
+            )
+
+    if available_testsets:
+        logger.info(f"Using testsets for mAP tracking: {available_testsets}")
 
     logger.info("%s", get_hparams_as_string(hp))
 

@@ -17,11 +17,19 @@ from src.scheduler import UserDefineExponentialLR
 # setting this to False in Apple Silicon context showed negligible impact.
 torch.backends.cudnn.benchmark = True
 
-
-# test_set_list stores whichever members of all_test_set_list are listed in hparams.yaml
-# default CoverHunter only included a configuration for "covers80"
+# ALL_TEST_SETS defines recognized testset names. A testset is active when its
+# name appears both here AND as a key in hparams.yaml with query_path/ref_path.
+#
+# For mAP-based early stopping, testsets are partitioned into two tiers:
+# - Stopping testsets (hp["map_stopping_testsets"]): Drive stopping/selection decisions
+# - Benchmark testsets (all others): Logged only, never influence training
+#
+# This separation enables research-grade evaluation where benchmark results
+# remain uncontaminated by training decisions.
+#
+# Original CoverHunter only included a configuration for "covers80"
 # but also listed "shs_test", "dacaos" (presumably a typo for da-tacos), "hymf_20", "hymf_100"
-ALL_TEST_SETS = ["covers80", "reels50easy", "reels50hard", "reels50transpose"]
+ALL_TEST_SETS = ["covers80", "shs100k-test", "reels50easy", "reels50hard", "reels50transpose", "meertens80disjoint", "meertens100", "meertens50hard", "meertens50easy", "meertens50"]
 
 
 class Trainer:
@@ -39,6 +47,13 @@ class Trainer:
         """
         Trainer class to organize the training methods.
 
+        Supports two early stopping modes controlled by hp["early_stop_metric"]:
+        - "val_loss" (default): Stop when validation loss plateaus. All testsets
+          remain uncontaminated benchmarks suitable for publication.
+        - "mAP": Stop when smoothed mAP plateaus on hp["map_stopping_testsets"].
+          Testsets not in that list are benchmark-only (logged but never
+          influence training decisions), preserving research-grade separation.
+
         Args:
         ----
           hp: dict
@@ -48,13 +63,31 @@ class Trainer:
           device: torch.device
             The device that will be used for computation.
           log_path: str
-            The summary writer log path.
+            TensorBoard SummaryWriter log path.
           checkpoint_dir: str
-            The directory where the model is saved to / loaded from.
+            Directory for saving/loading model checkpoints.
+          model_dir: str
+            Base directory for the training run.
           only_eval: bool
-            If set, run only once.
+            If True, run evaluation only (no training).
           first_eval: bool
-            if set, don't train the first time.
+            If True, evaluate before first training epoch.
+
+        Attributes (early stopping state):
+            best_validation_loss: float
+                Lowest validation loss observed (val_loss mode).
+            early_stopping_counter: int
+                Epochs since val_loss improvement.
+            map_stopping_testsets: list[str]
+                Testsets that drive mAP-based stopping decisions.
+            best_raw_map: float
+                Highest raw mAP observed on stopping testsets.
+            best_raw_map_epoch: int or None
+                Epoch where best_raw_map was achieved (for checkpoint selection).
+            smoothed_map: float or None
+                EMA-smoothed mAP for stopping decisions.
+            map_stopping_counter: int
+                Epochs since smoothed mAP improvement.
 
         """
         self.hp = hp
@@ -67,6 +100,21 @@ class Trainer:
         self.first_eval = first_eval
         self.best_validation_loss = float("inf")
         self.early_stopping_counter = 0
+
+        # --- mAP-based early stopping state (used when early_stop_metric="mAP") ---
+        # Testsets in this list influence stopping/selection decisions.
+        # Testsets NOT in this list are benchmark-only (logged but never drive decisions).
+        self.map_stopping_testsets = [
+            t for t in hp.get("map_stopping_testsets", []) if t in hp
+        ]
+        self.best_smoothed_map = 0.0
+        self.best_raw_map = 0.0
+        self.best_raw_map_epoch = None
+        self.smoothed_map = None  # None until first observation
+        self.map_stopping_counter = 0
+        # Cache of most recent mAP scores by testset (for stopping calculation)
+        self._current_epoch_map_scores = {}
+
         self.test_sets = [d for d in ALL_TEST_SETS if d in hp]
 
         self.training_data = []
@@ -266,9 +314,21 @@ class Trainer:
 
     def validate_one(self, data_type):
         """
-        Validate for the given data_type (can be val or test).
+        Compute validation or test loss for the current epoch.
 
-        Do it only every "every_n_epoch_to_test".
+        Evaluates the model on the specified data loader and logs loss metrics.
+        For data_type="val", also updates val_loss early stopping state
+        (best_validation_loss, early_stopping_counter) when early_stop_metric
+        is "val_loss".
+
+        Args:
+            data_type: "val" or "test"
+                Which data loader to evaluate.
+
+        Note:
+            Respects hp["every_n_epoch_to_test"] to skip evaluation on
+            intermediate epochs. This is separate from testset mAP evaluation,
+            which occurs in eval_and_log().
         """
         if not self.epoch % self.hp.get("every_n_epoch_to_test", 1) == 0:
             return
@@ -312,10 +372,26 @@ class Trainer:
 
     def eval_and_log(self):
         """
-        Validate the data types, evaluate the result and log.
+        Run validation, evaluate testsets, log results, and update early stopping state.
+
+        Performs three categories of evaluation:
+        1. Validation loss on val_path data (via validate_one)
+        2. Test loss on test_path data if configured (via validate_one)
+        3. mAP on each configured testset (logged to TensorBoard)
+
+        For mAP-based early stopping (early_stop_metric="mAP"):
+        - Collects mAP scores from all evaluated testsets
+        - Filters to map_stopping_testsets for stopping decisions
+        - Updates smoothed mAP and stopping counter via _check_map_early_stopping()
+        - Testsets not in map_stopping_testsets are logged as benchmarks only
+
+        Testset evaluation respects per-testset every_n_epoch_to_test settings.
         """
         self.validate_one("val")
         self.validate_one("test")
+
+        # Clear previous epoch's mAP cache
+        self._current_epoch_map_scores = {}
 
         valid_testlist = []
         for testset_name in self.test_sets:
@@ -345,7 +421,6 @@ class Trainer:
                 batch_size=self.hp["batch_size"],
                 device=self.device,
                 logger=self.logger,
-                reuse_embeddings=False,
             )
 
             self.summary_writer.add_scalar(
@@ -363,27 +438,277 @@ class Trainer:
                 int(time.time() - start),
             )
 
+            # Cache mAP for early stopping check
+            self._current_epoch_map_scores[testset_name] = mean_ap
+
+        # Perform mAP-based early stopping check if configured
+        if (
+            self.hp.get("early_stop_metric") == "mAP"
+            and self.map_stopping_testsets
+        ):
+            self._check_map_early_stopping()
+
+    def aggregate_stopping_map_scores(
+        self, map_scores: dict[str, float]
+    ) -> float:
+        """
+        Aggregate mAP scores across stopping-relevant testsets.
+
+        This method is intentionally isolated to make it easy for users to
+        customize the aggregation strategy for their research needs.
+
+        Args:
+            map_scores: Dictionary mapping testset names to their mAP values.
+                        Only includes testsets from map_stopping_testsets.
+
+        Returns:
+            Aggregated mAP score used for early stopping decisions.
+
+        Current implementation: arithmetic mean.
+
+        Alternative implementations users might substitute:
+            - Weighted mean:
+                weights = {"reels50hard": 0.5, "reels50easy": 0.3, ...}
+                return sum(scores[k] * weights[k] for k in scores) /
+                    sum(weights.values())
+            - Worst-case (conservative):
+                return min(scores.values())
+            - Primary testset only:
+                return scores.get("reels50hard", 0.0)
+        """
+        if not map_scores:
+            return 0.0
+        return sum(map_scores.values()) / len(map_scores)
+
+    def _update_smoothed_map(self, raw_map: float) -> float:
+        """
+        Update exponential moving average (EMA) of mAP for early stopping.
+
+        The EMA filters noise in mAP measurements (especially on small testsets)
+        to prevent false early stopping triggers while remaining responsive to
+        genuine performance plateaus.
+
+        Args:
+            raw_map: Current epoch's aggregated mAP score.
+
+        Returns:
+            Updated smoothed mAP value.
+        """
+        alpha = self.hp.get("map_smoothing_alpha", 0.3)
+        if self.smoothed_map is None:
+            self.smoothed_map = raw_map
+        else:
+            self.smoothed_map = (
+                alpha * raw_map + (1 - alpha) * self.smoothed_map
+            )
+        return self.smoothed_map
+
+    def _check_map_early_stopping(self) -> None:
+        """
+        Evaluate early stopping based on smoothed mAP from stopping testsets.
+
+        Called after testset evaluation when early_stop_metric="mAP".
+        Updates best_raw_map, best_raw_map_epoch, and map_stopping_counter.
+
+        The stopping decision uses smoothed mAP to filter noise, but
+        best_raw_map_epoch tracks the actual peak for checkpoint selection.
+        """
+        if not self._current_epoch_map_scores:
+            return
+
+        # Filter to only stopping-relevant testsets
+        stopping_scores = {
+            k: v
+            for k, v in self._current_epoch_map_scores.items()
+            if k in self.map_stopping_testsets
+        }
+
+        if not stopping_scores:
+            # No stopping testsets were evaluated this epoch
+            return
+
+        raw_map = self.aggregate_stopping_map_scores(stopping_scores)
+        smoothed = self._update_smoothed_map(raw_map)
+
+        # Track best raw mAP for checkpoint selection
+        if raw_map > self.best_raw_map:
+            self.best_raw_map = raw_map
+            self.best_raw_map_epoch = self.epoch
+            self.logger.info(
+                f"New best raw mAP: {raw_map:.4f} at epoch {self.epoch}"
+            )
+
+        # Stopping decision based on smoothed mAP
+        if smoothed > self.best_smoothed_map:
+            self.best_smoothed_map = smoothed
+            self.map_stopping_counter = 0
+        else:
+            self.map_stopping_counter += 1
+
+        self.logger.info(
+            f"mAP stopping check: raw={raw_map:.4f}, smoothed={smoothed:.4f}, "
+            f"best_smoothed={self.best_smoothed_map:.4f}, "
+            f"patience={self.map_stopping_counter}/{self.hp.get('map_stopping_patience', 5)}"
+        )
+
     def train(self, max_epochs):
         """
-        Train the model for max_epochs.
+        Train the model with configurable early stopping up to max_epochs.
+
+        Runs the training loop until max_epochs or early stopping triggers.
+        Early stopping behavior depends on hp["early_stop_metric"]:
+
+        Mode "val_loss" (default):
+            Stops when validation loss has not improved for
+            hp["early_stopping_patience"] epochs. All testsets remain
+            uncontaminated and suitable for publication as benchmarks.
+
+        Mode "mAP":
+            Stops when smoothed mAP on hp["map_stopping_testsets"] has not
+            improved for hp["map_stopping_patience"] epochs. Checkpoint
+            selection uses best_raw_map_epoch (actual peak, not smoothed).
+            Testsets not in map_stopping_testsets are evaluated and logged
+            but never influence stopping, preserving their validity as
+            held-out benchmarks for research publication.
+
+            For research with publication-grade benchmarks in this mode,
+            include only validation-tier testsets in map_stopping_testsets.
+            Testsets not in that list remain uncontaminated benchmarks.
+
+        Args:
+            max_epochs: Maximum number of epochs to train.
+
+        Returns:
+            None. Updates instance state including:
+            - self.epoch: Final epoch number
+            - self.best_validation_loss: Best val loss (val_loss mode)
+            - self.best_raw_map: Best mAP achieved (mAP mode)
+            - self.best_raw_map_epoch: Epoch of best mAP (mAP mode)
+
+        Note:
+            When every_n_epoch_to_test > 1, forces a final mAP evaluation
+            to ensure accurate metrics for train_tune experiment summaries.
+
         """
+        early_stop_metric = self.hp.get("early_stop_metric", "val_loss")
+        val_loss_patience = self.hp.get("early_stopping_patience", 1000)
+        map_patience = self.hp.get("map_stopping_patience", 5)
+
+        # Validate mAP mode configuration
+        if early_stop_metric == "mAP" and not self.map_stopping_testsets:
+            self.logger.warning(
+                "early_stop_metric='mAP' but no valid map_stopping_testsets found. "
+                "Falling back to val_loss mode."
+            )
+            early_stop_metric = "val_loss"
+
+        if early_stop_metric == "mAP":
+            self.logger.info(
+                f"Using mAP-based early stopping with testsets: {self.map_stopping_testsets}"
+            )
+            benchmark_testsets = [
+                t
+                for t in self.test_sets
+                if t not in self.map_stopping_testsets
+            ]
+            if benchmark_testsets:
+                self.logger.info(
+                    f"Benchmark testsets (not used for stopping): {benchmark_testsets}"
+                )
+
         first_eval = self.first_eval
         for epoch in range(max(0, 1 + self.epoch), max_epochs):
             self.train_epoch(epoch, first_eval)
             self.eval_and_log()
             self.save_model()
-            if self.early_stopping_counter >= self.hp.get(
-                "early_stopping_patience", 10000
-            ):
-                self.logger.info(
-                    "Early stopping at epoch %d due to lack of avg_foc_loss"
-                    "(focal loss improvement)",
-                    self.epoch,
-                )
+
+            # Check early stopping based on configured metric
+            should_stop = False
+            if early_stop_metric == "val_loss":
+                if self.early_stopping_counter >= val_loss_patience:
+                    self.logger.info(
+                        "Early stopping at epoch %d due to val_loss plateau "
+                        "(no improvement for %d epochs)",
+                        self.epoch,
+                        val_loss_patience,
+                    )
+                    should_stop = True
+            elif early_stop_metric == "mAP":
+                if self.map_stopping_counter >= map_patience:
+                    self.logger.info(
+                        "Early stopping at epoch %d due to smoothed mAP plateau "
+                        "(no improvement for %d epochs). "
+                        "Best raw mAP %.4f at epoch %d.",
+                        self.epoch,
+                        map_patience,
+                        self.best_raw_map,
+                        self.best_raw_map_epoch,
+                    )
+                    should_stop = True
+
+            if should_stop or self.only_eval:
+                self._ensure_final_evaluation()
                 return
-            if self.only_eval:
-                return
+
             first_eval = False
+
+        # Training completed without early stopping
+        self._ensure_final_evaluation()
+
+    def _ensure_final_evaluation(self):
+        """
+        Ensure final epoch has mAP evaluation for accurate reporting.
+
+        When every_n_epoch_to_test > 1, the final epoch may not have been
+        evaluated. This forces evaluation so train_tune can report accurate
+        final mAP in experiment summaries.
+        """
+        every_n = self.hp.get("every_n_epoch_to_test", 1)
+        if every_n > 1 and self.epoch % every_n != 0:
+            self.logger.info(
+                f"Forcing final mAP evaluation at epoch {self.epoch} "
+                f"(every_n_epoch_to_test={every_n})"
+            )
+            # Temporarily override to force evaluation
+            original_every_n = {}
+            for testset_name in self.test_sets:
+                hp_test = self.hp[testset_name]
+                original_every_n[testset_name] = hp_test.get(
+                    "every_n_epoch_to_test", 1
+                )
+                hp_test["every_n_epoch_to_test"] = 1
+
+            # Re-run testset evaluation only (skip val/test loaders)
+            self._current_epoch_map_scores = {}
+            for testset_name in self.test_sets:
+                hp_test = self.hp[testset_name]
+                save_name = hp_test.get("save_name", testset_name)
+                embed_dir = os.path.join(
+                    self.model_dir, f"embed_{self.epoch}_{save_name}"
+                )
+                query_in_ref_path = hp_test.get("query_in_ref_path", None)
+                mean_ap, hit_rate, _ = eval_for_map_with_feat(
+                    self.hp,
+                    self.model,
+                    embed_dir,
+                    query_path=hp_test["query_path"],
+                    ref_path=hp_test["ref_path"],
+                    query_in_ref_path=query_in_ref_path,
+                    batch_size=self.hp["batch_size"],
+                    device=self.device,
+                    logger=self.logger,
+                )
+                self.summary_writer.add_scalar(
+                    f"mAP/{testset_name}", mean_ap, self.epoch
+                )
+                self.summary_writer.add_scalar(
+                    f"hit_rate/{testset_name}", hit_rate, self.epoch
+                )
+                self._current_epoch_map_scores[testset_name] = mean_ap
+
+            # Restore original settings
+            for testset_name, orig_val in original_every_n.items():
+                self.hp[testset_name]["every_n_epoch_to_test"] = orig_val
 
 
 def save_checkpoint(model, optimizer, step, epoch, checkpoint_dir) -> None:

@@ -1,3 +1,4 @@
+### CoverHunterMPS training hyperparameters
 
 ### Training data paths
 train_path: "data/covers80/train.txt"
@@ -12,15 +13,15 @@ covers80:
 
 # Download the reels50easy dataset from https://www.irishtune.info/public/MLdata.htm
 # and then you can uncomment the next 4 lines.
-#reels50easy:
-#  query_path: "data/reels50easy_testset/full.txt"  # path to your bench
+# reels50easy:
+#  query_path: "data/reels50easy_testset/full.txt"  # # path to your prepared data
 #  ref_path: "data/reels50easy_testset/full.txt"
 #  every_n_epoch_to_test: 1
 
 # Download the reels50hard dataset from https://www.irishtune.info/public/MLdata.htm
 # and then you can uncomment the next 4 lines.
 #reels50hard:
-#  query_path: "data/reels50hard_testset/full.txt"  # path to your bench
+#  query_path: "data/reels50hard_testset/full.txt"  # # path to your prepared data
 #  ref_path: "data/reels50hard_testset/full.txt"
 #  every_n_epoch_to_test: 1
 
@@ -34,6 +35,39 @@ covers80:
 #  ref_path: "training/benchmark_ref.txt"
 #  query_in_ref_path: "training/datacos/query_in_ref.txt"
 #  every_n_epoch_to_test: 2  # validate after every n epoch
+
+# --- Early Stopping Configuration ---
+# early_stop_metric: "val_loss" or "mAP"
+#   - "val_loss" (default): Stop when validation loss plateaus. All testsets
+#     remain uncontaminated benchmarks suitable for publication.
+#   - "mAP": Stop when smoothed mAP plateaus on map_stopping_testsets.
+#     Checkpoint selection uses best raw mAP epoch.
+#
+# For research with publication-grade results:
+#   Set early_stop_metric: "mAP" and list only validation-tier testsets in
+#   map_stopping_testsets. Other testsets (defined above in this file)
+#   will be evaluated and logged but never influence training decisions,
+#   preserving their validity as held-out benchmarks.
+
+early_stop_metric: "val_loss"
+
+# map_stopping_testsets: List of testset names that drive stopping decisions.
+#   Only used when early_stop_metric: "mAP"
+#   Testsets not in this list are benchmark-only (logged but uncontaminated).
+#
+# map_stopping_testsets: ["reels50easy"]
+
+# map_stopping_patience: Epochs without smoothed mAP improvement before stopping.
+#   Only used when early_stop_metric: "mAP"
+#
+# map_stopping_patience: 5
+
+# map_smoothing_alpha: EMA weight for current mAP observation (0.0-1.0).
+#   Higher values = more responsive to recent changes, more noise sensitivity.
+#   Lower values = more stable, slower to detect genuine plateaus.
+#   Only used when early_stop_metric: "mAP"
+#
+# map_smoothing_alpha: 0.3
 
 every_n_epoch_to_test: 1  # validate after every n epoch
 every_n_epoch_to_save: 1  # save model after every n epoch
