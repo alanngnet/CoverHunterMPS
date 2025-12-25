@@ -5,8 +5,6 @@
 
 import argparse
 import os
-import sys
-
 import torch
 
 from src.eval_testset import eval_for_map_with_feat

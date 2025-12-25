@@ -7,10 +7,16 @@ import argparse
 import logging
 import os
 import gc
+import time
 import random
 import shutil
 import subprocess
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import (
+    as_completed,
+    TimeoutError as FuturesTimeoutError,
+)
+
 import multiprocessing as mp
 
 import librosa
@@ -300,6 +306,9 @@ def _extract_cqt_parallel(
 
     for i in range(0, len(missing_cqt_lines), batch_size):
         batch = missing_cqt_lines[i : i + batch_size]
+
+        BATCH_TIMEOUT_SECONDS = 30
+
         with ProcessPoolExecutor() as executor:
             worker_args = [
                 (
@@ -314,13 +323,49 @@ def _extract_cqt_parallel(
                 for line in batch
             ]
 
-            for result in executor.map(worker, worker_args):
-                if isinstance(result, str) and result.startswith(
-                    "Error processing line:"
+            futures = {
+                executor.submit(worker, args): args[0]["wav"]
+                for args in worker_args
+            }
+
+            try:
+                for future in as_completed(
+                    futures, timeout=BATCH_TIMEOUT_SECONDS
                 ):
-                    print(result)  # This will print only the error lines
-                    continue
-                dump_lines.append(dict_to_line(result))
+                    wav_path = futures[future]
+                    try:
+                        result = future.result()
+                        if isinstance(result, str) and result.startswith(
+                            "Error processing line:"
+                        ):
+                            print(result)
+                            continue
+                        dump_lines.append(dict_to_line(result))
+                        if len(dump_lines) % 1000 == 0:
+                            logging.info(
+                                "Extracted CQT for {} items: {}".format(
+                                    len(dump_lines),
+                                    result["perf"],
+                                ),
+                            )
+                    except Exception as e:
+                        logging.error(f"Exception processing {wav_path}: {e}")
+            except FuturesTimeoutError:
+                pending = [f for f in futures if not f.done()]
+                pending_files = [futures[f] for f in pending]
+                logging.error(
+                    f"BATCH TIMEOUT after {BATCH_TIMEOUT_SECONDS}s. Pending files ({len(pending)}):"
+                )
+                for pf in pending_files[:10]:
+                    logging.error(f"  {pf}")
+                with open("timeout_batch.txt", "a") as f:
+                    f.write(f"Batch {i}: {pending_files}\n")
+                logging.error("Force exiting due to MPS hang")
+                logging.error(
+                    "Aborting due to batch timeout - check timeout_batch.txt in current working folder"
+                )
+                os._exit(1)  # Hard kill - only way to escape hung MPS workers
+
                 if len(dump_lines) % 1000 == 0:
                     logging.info(
                         "Extracted CQT for {} items: {}".format(
@@ -337,8 +382,6 @@ def _extract_cqt_parallel(
             torch.cuda.synchronize()
         gc.collect()
         # Small delay to let system recover
-        import time
-
         time.sleep(0.1)
     write_lines(out_path, dump_lines)
 
