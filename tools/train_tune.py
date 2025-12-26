@@ -43,6 +43,37 @@ def make_deterministic(seed):
     torch.backends.cudnn.benchmark = False
 
 
+def apply_early_stopping_config(hp, experiments):
+    """
+    Apply early stopping configuration from experiments to hp.
+    
+    Supports both val_loss (default) and mAP-based early stopping.
+    """
+    hp["every_n_epoch_to_save"] = 100
+    hp["max_epochs"] = experiments.get("max_epochs", 15)
+    
+    # Early stopping mode
+    early_stop_metric = experiments.get("early_stop_metric", "val_loss")
+    hp["early_stop_metric"] = early_stop_metric
+    
+    if early_stop_metric == "mAP":
+        hp["map_stopping_testsets"] = experiments.get("map_stopping_testsets", [])
+        hp["map_stopping_patience"] = experiments.get("map_stopping_patience", 5)
+        hp["map_smoothing_alpha"] = experiments.get("map_smoothing_alpha", 0.3)
+        # val_loss patience still needed as fallback
+        hp["early_stopping_patience"] = experiments.get("early_stopping_patience", 1000)
+    else:
+        hp["early_stopping_patience"] = experiments["early_stopping_patience"]
+
+
+def get_slope_window(hp, experiments):
+    """Return appropriate slope window based on early stopping mode."""
+    if experiments.get("early_stop_metric") == "mAP":
+        return experiments.get("map_stopping_patience", 5)
+    return experiments["early_stopping_patience"]
+
+
+
 def run_experiment(
     hp_summary,
     checkpoint_dir,
@@ -216,10 +247,9 @@ if __name__ == "__main__":
     all_results = {}
 
     # chunk_frame experiments
-    hp["every_n_epoch_to_save"] = 100
-    hp["early_stopping_patience"] = experiments["early_stopping_patience"]
-    # default 15 max epochs unless specified in hp_tuning.yaml
-    hp["max_epochs"] = experiments.get("max_epochs", 15)
+
+# chunk_frame experiments
+    apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for chunk_frame in chunk_frames:
         hp["chunk_frame"] = chunk_frame
@@ -234,7 +264,7 @@ if __name__ == "__main__":
                 )
                 log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
                 metrics = get_final_metrics_from_logs(
-                    log_path, test_name, hp["early_stopping_patience"]
+                    log_path, test_name, get_slope_window(hp, experiments)
                 )
                 for key, value in metrics.items():
                     results[key].append(value)
@@ -248,9 +278,7 @@ if __name__ == "__main__":
 
     # m_per_class experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
-    hp["every_n_epoch_to_save"] = 100
-    hp["early_stopping_patience"] = experiments["early_stopping_patience"]
-    hp["max_epochs"] = experiments.get("max_epochs", 15)
+    apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for m_per_class in m_per_classes:
         hp["m_per_class"] = m_per_class
@@ -258,7 +286,7 @@ if __name__ == "__main__":
             hp_summary = f"m_per_class{m_per_class}"
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
             metrics = get_final_metrics_from_logs(
-                log_path, test_name, hp["early_stopping_patience"]
+                log_path, test_name, get_slope_window(hp, experiments)
             )
             for key, value in metrics.items():
                 results[key].append(value)
@@ -272,9 +300,7 @@ if __name__ == "__main__":
 
     # num_blocks experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
-    hp["every_n_epoch_to_save"] = 100
-    hp["early_stopping_patience"] = experiments["early_stopping_patience"]
-    hp["max_epochs"] = experiments.get("max_epochs", 15)
+    apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for num_blocks in num_blockss:
         hp["encoder"]["num_blocks"] = num_blocks
@@ -282,7 +308,7 @@ if __name__ == "__main__":
             hp_summary = f"num_blocks{num_blocks}"
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
             metrics = get_final_metrics_from_logs(
-                log_path, test_name, hp["early_stopping_patience"]
+                log_path, test_name, get_slope_window(hp, experiments)
             )
             for key, value in metrics.items():
                 results[key].append(value)
@@ -296,9 +322,7 @@ if __name__ == "__main__":
 
     # spec_aug experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
-    hp["every_n_epoch_to_save"] = 100
-    hp["early_stopping_patience"] = experiments["early_stopping_patience"]
-    hp["max_epochs"] = experiments.get("max_epochs", 15)
+    apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for spec_augmentation in spec_augmentations:
         hp["spec_augmentation"] = spec_augmentation
@@ -318,7 +342,7 @@ if __name__ == "__main__":
             )
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
             metrics = get_final_metrics_from_logs(
-                log_path, test_name, hp["early_stopping_patience"]
+                log_path, test_name, get_slope_window(hp, experiments)
             )
             for key, value in metrics.items():
                 results[key].append(value)
@@ -332,9 +356,7 @@ if __name__ == "__main__":
 
     # loss experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
-    hp["every_n_epoch_to_save"] = 100
-    hp["early_stopping_patience"] = experiments["early_stopping_patience"]
-    hp["max_epochs"] = experiments.get("max_epochs", 15)
+    apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for loss in losses:
         hp["foc"] = foc = loss["foc"]
@@ -355,7 +377,7 @@ if __name__ == "__main__":
             )
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
             metrics = get_final_metrics_from_logs(
-                log_path, test_name, hp["early_stopping_patience"]
+                log_path, test_name, get_slope_window(hp, experiments)
             )
             for key, value in metrics.items():
                 results[key].append(value)
@@ -369,9 +391,7 @@ if __name__ == "__main__":
 
     # learning_rate experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
-    hp["every_n_epoch_to_save"] = 100
-    hp["early_stopping_patience"] = experiments["early_stopping_patience"]
-    hp["max_epochs"] = experiments.get("max_epochs", 15)
+    apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for learning_rate in learning_rates:
         hp["learning_rate"] = learning_rate
@@ -379,7 +399,7 @@ if __name__ == "__main__":
             hp_summary = f"lrate{learning_rate}"
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
             metrics = get_final_metrics_from_logs(
-                log_path, test_name, hp["early_stopping_patience"]
+                log_path, test_name, get_slope_window(hp, experiments)
             )
             for key, value in metrics.items():
                 results[key].append(value)
@@ -393,9 +413,7 @@ if __name__ == "__main__":
 
     # lr_decay experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
-    hp["every_n_epoch_to_save"] = 100
-    hp["early_stopping_patience"] = experiments["early_stopping_patience"]
-    hp["max_epochs"] = experiments.get("max_epochs", 15)
+    apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for lr_decay in lr_decays:
         hp["lr_decay"] = lr_decay
@@ -403,7 +421,7 @@ if __name__ == "__main__":
             hp_summary = f"lr_decay{lr_decay}"
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
             metrics = get_final_metrics_from_logs(
-                log_path, test_name, hp["early_stopping_patience"]
+                log_path, test_name, get_slope_window(hp, experiments)
             )
             for key, value in metrics.items():
                 results[key].append(value)
@@ -417,9 +435,7 @@ if __name__ == "__main__":
 
     # AdamW betas experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
-    hp["every_n_epoch_to_save"] = 100
-    hp["early_stopping_patience"] = experiments["early_stopping_patience"]
-    hp["max_epochs"] = experiments.get("max_epochs", 15)
+    apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for adam_beta in adam_betas:
         hp["adam_b1"] = adam_beta[0]
@@ -428,7 +444,7 @@ if __name__ == "__main__":
             hp_summary = "adam_betas" + "_".join([str(c) for c in adam_beta])
             log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
             metrics = get_final_metrics_from_logs(
-                log_path, test_name, hp["early_stopping_patience"]
+                log_path, test_name, get_slope_window(hp, experiments)
             )
             for key, value in metrics.items():
                 results[key].append(value)
