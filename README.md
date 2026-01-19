@@ -305,7 +305,9 @@ Let's say you like your model's achievement at the checkpoint from epoch 20 in f
 2. Edit or confirm that `active_fold.txt` is present and contains "0" (the index for fold 1).
 3. Delete the old `fold_2_started.txt` and any higher-numbered `fold_N_started.txt` files.
 4. Delete the old `train_fold_2.txt` and any higher-numbered `train_fold_N.txt` files.
-5. Restart training, and distinguish this fork by using a different `runid`, for example if you previously used 'prodv1.0' perhaps now:
+4. Delete the old `val_fold_2.txt` and any higher-numbered `val_fold_N.txt` files.
+5. Delete the old `full_dataset_started.txt` file if present.
+6. Restart training, and distinguish this fork by using a different `runid`, for example if you previously used 'prodv1.0' perhaps now:
 ```
 python -m tools.train_prod training/covers80/ --runid='prodv1.1'
 ```
