@@ -257,7 +257,7 @@ Launch training with:
 python -m tools.train_prod training/covers80/ --runid='test of production training'
 ```
 
-You can safely interrupt production training for any reason and re-launching it with the same command will resume from the last fold and checkpoint that was automatically saved by this script.
+You can safely interrupt production training for any reason and re-launching it with the same command will resume from the last fold and checkpoint that was automatically saved by this script. See also "how to fork a production training run with a new fold" below.
 
 TensorBoard will show each fold as a separate run, but within a continuous progression of epochs. If you run a lot of epochs, identifying your best epochs in Tensorboard can be tedious. You may find it easier to interpret your results using the `report_prod_logs` utility. First edit the TESTSETS line near the top of the script to define which test sets you want to report on. Then run:
 ```
@@ -298,7 +298,17 @@ BEST EPOCHS BY AVERAGE mAP (all test sets)
     reels50easy: 0.9449
     reels50hard: 0.7277
 ```
+### How to fork a production training run with a new fold
 
+Let's say you like your model's achievement at the checkpoint from epoch 20 in fold 1, but you've changed something like hyperparameters or code and want to restart a new fold 2 from that checkpoint:
+1. Delete or move the `do_` and `g_` checkpoint files numbered beyond 20 in the `prod_checkpoints` folder.
+2. Edit or confirm that `active_fold.txt` is present and contains "0" (the index for fold 1).
+3. Delete the old `fold_2_started.txt` and any higher-numbered `fold_N_started.txt` files.
+4. Delete the old `train_fold_2.txt` and any higher-numbered `train_fold_N.txt` files.
+5. Restart training, and distinguish this fork by using a different `runid`, for example if you previously used 'prodv1.0' perhaps now:
+```
+python -m tools.train_prod training/covers80/ --runid='prodv1.1'
+```
 
 ## Generate Reference Embeddings
 
