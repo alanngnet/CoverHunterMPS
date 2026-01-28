@@ -17,9 +17,6 @@ from src.scheduler import UserDefineExponentialLR
 # setting this to False in Apple Silicon context showed negligible impact.
 torch.backends.cudnn.benchmark = True
 
-# ALL_TEST_SETS defines recognized testset names. A testset is active when its
-# name appears both here AND as a key in hparams.yaml with query_path/ref_path.
-#
 # For mAP-based early stopping, testsets are partitioned into two tiers:
 # - Stopping testsets (hp["map_stopping_testsets"]): Drive stopping/selection decisions
 # - Benchmark testsets (all others): Logged only, never influence training
@@ -29,7 +26,43 @@ torch.backends.cudnn.benchmark = True
 #
 # Original CoverHunter only included a configuration for "covers80"
 # but also listed "shs_test", "dacaos" (presumably a typo for da-tacos), "hymf_20", "hymf_100"
-ALL_TEST_SETS = ["covers80", "shs100k-test", "reels50easy", "reels50hard", "reels50transpose", "meertens80disjoint", "meertens100", "meertens50hard", "meertens50easy", "meertens50"]
+#
+# This legacy list of test sets retained as a reference comment from before
+# immplementing _discover_testsets():
+# ALL_TEST_SETS = [
+#     "covers80",
+#     "shs100k-test",
+#     "reels50easy",
+#     "reels50hard",
+#     "reels50transpose",
+#     "meertens80disjoint",
+#     "meertens100",
+#     "meertens50hard",
+#     "meertens50easy",
+#     "meertens50",
+# ]
+
+
+def _discover_testsets(hp: dict) -> list[str]:
+    """
+    Discover testset configurations in hyperparameters.
+
+    A testset is any top-level key whose value is a dict containing
+    both 'query_path' and 'ref_path'. This allows users to define
+    arbitrary testset names without modifying code.
+
+    Returns:
+        List of testset names found in hp.
+    """
+    testsets = []
+    for key, value in hp.items():
+        if (
+            isinstance(value, dict)
+            and "query_path" in value
+            and "ref_path" in value
+        ):
+            testsets.append(key)
+    return testsets
 
 
 class Trainer:
@@ -101,6 +134,11 @@ class Trainer:
         self.best_validation_loss = float("inf")
         self.early_stopping_counter = 0
 
+        # Tracks the epoch with best value of whichever metric drives early stopping.
+        # Used by train_prod.py for checkpoint selection after each fold.
+        self.best_checkpoint_epoch = None
+        self.best_checkpoint_value = None  # Set in first evaluation
+
         # --- mAP-based early stopping state (used when early_stop_metric="mAP") ---
         # Testsets in this list influence stopping/selection decisions.
         # Testsets NOT in this list are benchmark-only (logged but never drive decisions).
@@ -115,7 +153,9 @@ class Trainer:
         # Cache of most recent mAP scores by testset (for stopping calculation)
         self._current_epoch_map_scores = {}
 
-        self.test_sets = [d for d in ALL_TEST_SETS if d in hp]
+        self.test_sets = _discover_testsets(hp)
+        if self.test_sets:
+            self.logger.info(f"Discovered testsets: {self.test_sets}")
 
         self.training_data = []
         infer_len = hp["chunk_frame"][0] * hp["mean_size"]
@@ -224,24 +264,47 @@ class Trainer:
     def configure_scheduler(self):
         """
         Configure the model scheduler.
+
+        Supports optional hold_steps parameter to delay the start of
+        exponential decay, allowing the model to stabilize at the initial
+        learning rate before decay begins.
+
+        Use cases:
+        - train.py: Allows more exploration at initial LR before decay,
+          or stabilization when resuming from a checkpoint.
+        - train_prod.py: Helps later folds adapt to new data splits after
+          loading checkpoints from previous folds, where aggressive early
+          decay can hurt convergence.
+
+        Set hold_steps: 0 in hparams to disable (immediate decay).
+        Note: Mutually exclusive with warmup; if warmup=True, hold_steps
+        is ignored.
+
         """
         self.scheduler = UserDefineExponentialLR(
             self.optimizer,
             gamma=self.hp["lr_decay"],
             min_lr=self.hp["min_lr"],
             last_epoch=self.epoch,
+            hold_steps=self.hp.get("hold_steps", 0),
         )
+        # Restore step count used for lr holds, if resuming from checkpoint
+        if (
+            hasattr(self, "_pending_scheduler_step_count")
+            and self._pending_scheduler_step_count > 0
+        ):
+            self.scheduler.set_step_count(self._pending_scheduler_step_count)
+            self._pending_scheduler_step_count = 0  # Clear after use
 
     def load_model(self, advanced=False):
-        """
-        Load the current model from checkpoint_dir.
-        """
-        self.step, self.epoch = load_checkpoint(
+        """Load the current model from checkpoint_dir."""
+        self.step, self.epoch, early_stopping_state = load_checkpoint(
             self.model,
             self.optimizer,
             self.checkpoint_dir,
             advanced=advanced,
         )
+        self.restore_early_stopping_state(early_stopping_state)
 
     def reset_learning_rate(self, new_lr=None):
         """
@@ -267,9 +330,7 @@ class Trainer:
         self.configure_scheduler()
 
     def save_model(self):
-        """
-        Save the current model to checkpoint_dir.
-        """
+        """Save the current model to checkpoint_dir."""
         if self.epoch % self.hp.get("every_n_epoch_to_save", 1) != 0:
             return
 
@@ -279,6 +340,63 @@ class Trainer:
             self.step,
             self.epoch,
             self.checkpoint_dir,
+            early_stopping_state=self.get_early_stopping_state(),
+        )
+
+    def get_early_stopping_state(self) -> dict:
+        """Export early stopping state for checkpoint persistence."""
+        return {
+            "best_validation_loss": self.best_validation_loss,
+            "early_stopping_counter": self.early_stopping_counter,
+            "best_checkpoint_epoch": self.best_checkpoint_epoch,
+            "best_checkpoint_value": self.best_checkpoint_value,
+            "best_raw_map": self.best_raw_map,
+            "best_raw_map_epoch": self.best_raw_map_epoch,
+            "best_smoothed_map": self.best_smoothed_map,
+            "smoothed_map": self.smoothed_map,
+            "map_stopping_counter": self.map_stopping_counter,
+            "scheduler_step_count": getattr(
+                self.scheduler, "_internal_step_count", 0
+            ),
+        }
+
+    def restore_early_stopping_state(self, state: dict) -> None:
+        """Restore early stopping state from checkpoint."""
+        if state is None:
+            return
+        self.best_validation_loss = state.get(
+            "best_validation_loss", float("inf")
+        )
+        self.early_stopping_counter = state.get("early_stopping_counter", 0)
+        self.best_checkpoint_epoch = state.get("best_checkpoint_epoch")
+        self.best_checkpoint_value = state.get("best_checkpoint_value")
+        self.best_raw_map = state.get("best_raw_map", 0.0)
+        self.best_raw_map_epoch = state.get("best_raw_map_epoch")
+        self.best_smoothed_map = state.get("best_smoothed_map", 0.0)
+        self.smoothed_map = state.get("smoothed_map")
+        self.map_stopping_counter = state.get("map_stopping_counter", 0)
+        self.logger.info(
+            f"Restored early stopping state: best_checkpoint_epoch={self.best_checkpoint_epoch}, "
+            f"best_validation_loss={self.best_validation_loss:.6f}, "
+            f"best_raw_map={self.best_raw_map:.4f}"
+        )
+        # Note: scheduler_step_count is restored in configure_scheduler()
+        # after this method runs, so we stash it for later
+        self._pending_scheduler_step_count = state.get(
+            "scheduler_step_count", 0
+        )
+
+    def reset_early_stopping_state(self) -> None:
+        """Reset early stopping state for new training phases (e.g., new folds).
+        Does NOT lose memory of best mAP and checkpoint so far.
+        Used by train_prod.py to give model time to adjust to new data in each fold.
+        """
+        self.early_stopping_counter = 0
+        self.best_smoothed_map = 0.0
+        self.smoothed_map = None
+        self.map_stopping_counter = 0
+        self.logger.info(
+            "Reset early stopping counter and smoothed_map for new fold"
         )
 
     def train_epoch(self, epoch, first_eval):
@@ -367,6 +485,14 @@ class Trainer:
             if validation_loss < self.best_validation_loss:
                 self.best_validation_loss = validation_loss
                 self.early_stopping_counter = 0
+                # Update checkpoint tracking for val_loss mode
+                if self.hp.get("early_stop_metric", "val_loss") == "val_loss":
+                    self.best_checkpoint_epoch = self.epoch
+                    self.best_checkpoint_value = validation_loss
+                    self.logger.info(
+                        f"New best checkpoint (val_loss): epoch {self.epoch} "
+                        f"with loss={validation_loss:.6f}"
+                    )
             else:
                 self.early_stopping_counter += 1
 
@@ -534,8 +660,12 @@ class Trainer:
         if raw_map > self.best_raw_map:
             self.best_raw_map = raw_map
             self.best_raw_map_epoch = self.epoch
+            # Update unified checkpoint tracking
+            self.best_checkpoint_epoch = self.epoch
+            self.best_checkpoint_value = raw_map
             self.logger.info(
-                f"New best raw mAP: {raw_map:.4f} at epoch {self.epoch}"
+                f"New best checkpoint (mAP): epoch {self.epoch} "
+                f"with mAP={raw_map:.4f}"
             )
 
         # Stopping decision based on smoothed mAP
@@ -548,7 +678,7 @@ class Trainer:
         self.logger.info(
             f"mAP stopping check: raw={raw_map:.4f}, smoothed={smoothed:.4f}, "
             f"best_smoothed={self.best_smoothed_map:.4f}, "
-            f"patience={self.map_stopping_counter}/{self.hp.get('map_stopping_patience', 5)}"
+            f"patience={self.map_stopping_counter}/{self.hp.get('early_stopping_patience', 5)}"
         )
 
     def train(self, max_epochs):
@@ -565,7 +695,7 @@ class Trainer:
 
         Mode "mAP":
             Stops when smoothed mAP on hp["map_stopping_testsets"] has not
-            improved for hp["map_stopping_patience"] epochs. Checkpoint
+            improved for hp["early_stopping_patience"] epochs. Checkpoint
             selection uses best_raw_map_epoch (actual peak, not smoothed).
             Testsets not in map_stopping_testsets are evaluated and logged
             but never influence stopping, preserving their validity as
@@ -591,8 +721,7 @@ class Trainer:
 
         """
         early_stop_metric = self.hp.get("early_stop_metric", "val_loss")
-        val_loss_patience = self.hp.get("early_stopping_patience", 1000)
-        map_patience = self.hp.get("map_stopping_patience", 5)
+        patience = self.hp.get("early_stopping_patience", 20)
 
         # Validate mAP mode configuration
         if early_stop_metric == "mAP" and not self.map_stopping_testsets:
@@ -625,22 +754,22 @@ class Trainer:
             # Check early stopping based on configured metric
             should_stop = False
             if early_stop_metric == "val_loss":
-                if self.early_stopping_counter >= val_loss_patience:
+                if self.early_stopping_counter >= patience:
                     self.logger.info(
                         "Early stopping at epoch %d due to val_loss plateau "
                         "(no improvement for %d epochs)",
                         self.epoch,
-                        val_loss_patience,
+                        patience,
                     )
                     should_stop = True
             elif early_stop_metric == "mAP":
-                if self.map_stopping_counter >= map_patience:
+                if self.map_stopping_counter >= patience:
                     self.logger.info(
                         "Early stopping at epoch %d due to smoothed mAP plateau "
                         "(no improvement for %d epochs). "
                         "Best raw mAP %.4f at epoch %d.",
                         self.epoch,
-                        map_patience,
+                        patience,
                         self.best_raw_map,
                         self.best_raw_map_epoch,
                     )
@@ -711,7 +840,9 @@ class Trainer:
                 self.hp[testset_name]["every_n_epoch_to_test"] = orig_val
 
 
-def save_checkpoint(model, optimizer, step, epoch, checkpoint_dir) -> None:
+def save_checkpoint(
+    model, optimizer, step, epoch, checkpoint_dir, early_stopping_state=None
+) -> None:
     g_checkpoint_path = f"{checkpoint_dir}/g_{epoch:08d}"
 
     if isinstance(model, torch.nn.DataParallel):
@@ -722,13 +853,19 @@ def save_checkpoint(model, optimizer, step, epoch, checkpoint_dir) -> None:
         state_dict = model.state_dict()
 
     torch.save({"generator": state_dict}, g_checkpoint_path)
+
+    do_state = {
+        "optim_g": optimizer.state_dict(),
+        "steps": step,
+        "epoch": epoch,
+    }
+    if early_stopping_state is not None:
+        do_state["early_stopping"] = early_stopping_state
+
     d_checkpoint_path = f"{checkpoint_dir}/do_{epoch:08d}"
-    torch.save(
-        {"optim_g": optimizer.state_dict(), "steps": step, "epoch": epoch},
-        d_checkpoint_path,
-    )
-    logging.info(f"save checkpoint to {g_checkpoint_path}")
-    logging.info(f"save step:{step}, epoch:{epoch}")
+    torch.save(do_state, d_checkpoint_path)
+    logging.info(f"Save checkpoint to {g_checkpoint_path}")
+    logging.info(f"Save step:{step}, epoch:{epoch}")
 
 
 def load_checkpoint(
@@ -746,23 +883,24 @@ def load_checkpoint(
             model.load_state_dict(model_dict)
             for k in model_dict:
                 if k not in state_dict_g:
-                    logging.warning(f"{k} not be initialized")
+                    logging.warning(f"{k} is not initialized")
         else:
             model.load_state_dict(state_dict_g["generator"])
-            # self.load_state_dict(state_dict_g)
 
         logging.info(f"load g-model from {checkpoint_dir}")
 
     if state_dict_do is None:
         logging.info("using init value of steps and epoch")
         step, epoch = 1, -1
+        early_stopping_state = None
     else:
         step, epoch = state_dict_do["steps"] + 1, state_dict_do["epoch"]
+        early_stopping_state = state_dict_do.get("early_stopping")
         logging.info(f"load d-model from {checkpoint_dir}")
         optimizer.load_state_dict(state_dict_do["optim_g"])
 
     logging.info(f"step:{step}, epoch:{epoch}")
-    return step, epoch
+    return step, epoch, early_stopping_state
 
 
 def train_one_epoch(
@@ -797,7 +935,7 @@ def train_one_epoch(
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-
+            scheduler.increment_step()
             _loss_memory = {"lr": get_lr(optimizer)}
             for key, value in losses.items():
                 _loss_memory.update({key: value.item()})

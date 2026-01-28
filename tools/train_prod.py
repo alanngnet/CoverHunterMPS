@@ -12,8 +12,8 @@ Controlled by hp["early_stop_metric"] (inherits from Trainer):
 
 "val_loss" (default):
     Stop each fold when validation loss plateaus. Checkpoint selection uses
-    retrospective mAP peak detection via TensorBoard log parsing. All testsets
-    remain uncontaminated.
+    the epoch with lowest validation loss (tracked live by Trainer). Use this
+    mode when no benchmark testsets are available for your musical culture.
 
 "mAP":
     Stop each fold when smoothed mAP plateaus on hp["map_stopping_testsets"].
@@ -41,7 +41,7 @@ Expects all standard hparams.yaml parameters plus:
     k_folds: Number of cross-validation folds
     early_stopping_patience: Patience for fold training (shorter than research)
         Set a lower early_stopping_patience than you likely used in experiments,
-        to avoidoverfitting in each fold.
+        to avoid overfitting in each fold.
 
     final_early_stopping_patience: Optional longer patience for final run
     fold_lr_decay: Learning rate decay for folds after the first
@@ -62,7 +62,9 @@ Legacy Support
 --------------
 The module constant MAP_TESTSETS provides backward compatibility when
 hp["map_stopping_testsets"] is not specified. New configurations should
-use the hyperparameter instead.
+use the hyperparameter instead. In val_loss mode, these
+testsets are still evaluated and logged for monitoring, but checkpoint
+selection uses validation loss (tracked by Trainer).
 
 Optionally specify in MAP_TESTSETS which testsets to use to define peak mAP.
 Add or remove from this list based on your relevant testsets.
@@ -86,8 +88,7 @@ Created on Wed May 22 19:27:14 2024
 MAP_TESTSETS = ["reels50easy", "reels50hard", "reels50transpose"]
 
 import argparse
-import os, glob, shutil
-import time
+import os, glob, shutil, time
 import sys
 import json
 import numpy as np
@@ -98,9 +99,10 @@ from src.trainer import Trainer
 from src.model import Model
 from src.utils import create_logger, get_hparams_as_string, load_hparams
 from src.dataset import AudioFeatDataset, read_lines
-from tensorboard.backend.event_processing.event_accumulator import (
-    EventAccumulator,
-)
+
+# from tensorboard.backend.event_processing.event_accumulator import (
+#    EventAccumulator,
+# )
 
 
 def extract_labels(dataset):
@@ -127,124 +129,18 @@ def load_fold_indices(filepath):
         return json.load(f)
 
 
-def get_map_from_logs(log_dir, testset_name, epoch):
-    """
-    Get mAP value for specific testset and epoch
-    """
-    event_files = sorted(
-        [f for f in os.listdir(log_dir) if "events.out.tfevents" in f],
-        key=lambda x: os.path.getctime(os.path.join(log_dir, x)),
-    )
-    if not event_files:
-        return None
-
-    event_file = os.path.join(log_dir, event_files[-1])
-    ea = EventAccumulator(event_file)
-    ea.Reload()
-
-    try:
-        map_values = ea.Scalars(f"mAP/{testset_name}")
-        # Find the closest event to our target epoch
-        closest_event = min(
-            map_values, key=lambda x: abs(x.step - epoch), default=None
-        )
-        # Allow events within 1 step of target epoch
-        if closest_event and abs(closest_event.step - epoch) <= 1:
-            return closest_event.value
-    except KeyError:
-        return None
-    return None
+def load_global_best(filepath):
+    """Load global best checkpoint tracking across folds."""
+    if os.path.exists(filepath):
+        with open(filepath, "r") as f:
+            return json.load(f)
+    return {"epoch": None, "value": None}
 
 
-def get_average_map_for_epoch(log_dir, testsets, epoch):
-    """
-    Calculate average mAP across all specified testsets for a given epoch.
-
-    Helper for find_peak_map_epoch(). Reads mAP values from TensorBoard
-    event files and returns their arithmetic mean.
-
-    Note:
-    Uses arithmetic mean for aggregation. For alternative strategies
-    (weighted, min), modify Trainer.aggregate_stopping_map_scores()
-    when using mAP-based early stopping instead of this log-parsing path.
-
-    """
-    maps = []
-    for testset in testsets:
-        map_value = get_map_from_logs(log_dir, testset, epoch)
-        if map_value is not None:
-            maps.append(map_value)
-
-    return np.mean(maps) if maps else None
-
-
-def find_peak_map_epoch(
-    log_dir, testsets, current_epoch, early_stopping_window
-):
-    """
-    Find the epoch with highest average mAP within the early stopping window
-
-    Used for retrospective checkpoint selection when early_stop_metric="val_loss".
-    When early_stop_metric="mAP", Trainer tracks best_raw_map_epoch directly
-    and this function serves only as a fallback.
-
-    Args:
-        log_dir: Directory containing tensorboard logs
-        testsets: List of testset names to check
-        current_epoch: The epoch at which training stopped
-        early_stopping_window: Number of epochs to look back
-
-    Returns:
-        int or None: Epoch number with highest average mAP within the window,
-        or None if no mAP data found.
-
-    Note:
-        This function parses TensorBoard logs after training completes,
-        which requires a brief sleep for filesystem sync. The mAP-based
-        early stopping mode in Trainer avoids this latency by tracking
-        the best epoch during training.
-
-    """
-    event_files = sorted(
-        [f for f in os.listdir(log_dir) if "events.out.tfevents" in f],
-        key=lambda x: os.path.getctime(os.path.join(log_dir, x)),
-    )
-    if not event_files:
-        return None
-
-    event_file = os.path.join(log_dir, event_files[-1])
-    ea = EventAccumulator(event_file)
-    ea.Reload()
-
-    # Calculate the earliest epoch to consider
-    earliest_epoch = max(0, current_epoch - early_stopping_window)
-
-    # Get all epochs where we have mAP values, filtered by window
-    epochs_to_check = set()
-    for testset in testsets:
-        try:
-            events = ea.Scalars(f"mAP/{testset}")
-            epochs_to_check.update(
-                event.step
-                for event in events
-                if earliest_epoch <= event.step <= current_epoch
-            )
-        except KeyError:
-            continue
-
-    if not epochs_to_check:
-        return None
-
-    # Find epoch with highest average mAP within window
-    best_epoch = None
-    best_map = -float("inf")
-    for epoch in epochs_to_check:
-        avg_map = get_average_map_for_epoch(log_dir, testsets, epoch)
-        if avg_map is not None and avg_map > best_map:
-            best_map = avg_map
-            best_epoch = epoch
-
-    return best_epoch
+def save_global_best(filepath, epoch, value):
+    """Persist global best checkpoint across abort/resume events."""
+    with open(filepath, "w") as f:
+        json.dump({"epoch": epoch, "value": value}, f)
 
 
 def cleanup_checkpoints(checkpoint_dir, best_epoch):
@@ -297,19 +193,10 @@ def cross_validate(
 
     Checkpoint Selection
     --------------------
-    After each fold completes:
-
-    If early_stop_metric="mAP" and Trainer tracked best_raw_map_epoch:
-        Uses Trainer's live-tracked peak mAP epoch directly.
-
-    If early_stop_metric="val_loss" with testsets available:
-        Falls back to retrospective log parsing via find_peak_map_epoch().
-
-    Otherwise:
-        Uses the final checkpoint from early stopping.
-
-    Checkpoints after the selected best epoch are cleaned up to save disk
-    space and ensure the best model is used for subsequent folds.
+    After each fold completes, uses Trainer's tracked best_checkpoint_epoch,
+    which reflects the best epoch for the configured early_stop_metric
+    (lowest val_loss or highest raw mAP). Checkpoints after the selected
+    best epoch are cleaned up to save disk space.
 
     Learning Rate Strategy
     ----------------------
@@ -356,7 +243,9 @@ def cross_validate(
     if os.path.exists(active_fold_file):
         with open(active_fold_file, "r") as f:
             last_completed_fold = int(f.readline().strip())
-        logger.info(f"Resuming from fold {last_completed_fold + 1}")
+        logger.info(
+            f"Last completed fold: {last_completed_fold}; resuming at fold {last_completed_fold + 1}"
+        )
         fold_indices = load_fold_indices(fold_indices_file)
     else:
         kf = StratifiedKFold(
@@ -373,26 +262,32 @@ def cross_validate(
     original_train_path = hp["train_path"]
     original_test_path = hp.pop("test_path")  # save for final full dataset
 
-    # Identify available testsets from those specified in MAP_TESTSETS
-    available_testsets = [t for t in MAP_TESTSETS if t in hp]
-    if not available_testsets:
-        logger.warning(
-            "No specified testsets found in hyperparameters. Using validation loss for peak detection."
+    # Track global best checkpoint across all folds
+    global_best_file = os.path.join(model_dir, "global_best.json")
+    global_best = load_global_best(global_best_file)
+    global_best_epoch = global_best["epoch"]
+    global_best_value = global_best["value"]
+    early_stop_metric = hp.get("early_stop_metric", "val_loss")
+
+    if global_best_epoch is not None:
+        logger.info(
+            f"Loaded global best: epoch {global_best_epoch}, "
+            f"{early_stop_metric}={global_best_value:.4f}"
         )
 
-    for fold, (train_idx, val_idx) in enumerate(fold_indices):
+    for fold, (train_idx, val_idx) in enumerate(fold_indices, start=1):
         if fold <= last_completed_fold:
             continue
 
-        logger.info(f"Training on fold {fold+1}/{n_splits}")
+        logger.info(f"Training on fold {fold}/{n_splits}")
 
         # Write temporary train and val files
-        train_file = os.path.join(model_dir, f"train_fold_{fold+1}.txt")
-        val_file = os.path.join(model_dir, f"val_fold_{fold+1}.txt")
+        train_file = os.path.join(model_dir, f"train_fold_{fold}.txt")
+        val_file = os.path.join(model_dir, f"val_fold_{fold}.txt")
         write_temp_file(data_lines, train_idx, train_file)
         write_temp_file(data_lines, val_idx, val_file)
         logger.info(
-            f"Temporary fold {fold+1} data files created at {train_file} and {val_file}"
+            f"Temporary fold {fold} data files created at {train_file} and {val_file}"
         )
 
         # Temporarily change hp paths
@@ -400,11 +295,11 @@ def cross_validate(
         hp["val_path"] = val_file
 
         # Create a unique log path for this fold
-        log_path = os.path.join(model_dir, "logs", f"{run_id}_fold_{fold+1}")
+        log_path = os.path.join(model_dir, "logs", f"{run_id}_fold_{fold}")
         os.makedirs(log_path, exist_ok=True)
 
         # Check if this is a new fold start
-        fold_start_file = os.path.join(model_dir, f"fold_{fold+1}_started.txt")
+        fold_start_file = os.path.join(model_dir, f"fold_{fold}_started.txt")
         is_new_fold_start = not os.path.exists(fold_start_file)
 
         # Instantiate and train a new Trainer instance for this fold
@@ -422,62 +317,124 @@ def cross_validate(
         trainer.load_model()
         trainer.configure_scheduler()
 
-        # different learning-rate strategy for all folds after the first
-        if fold > 0 and is_new_fold_start:
-            # Calculate evenly spaced learning rates from 0.0001 to min_lr
+        # Reset early stopping state for new folds
+        if is_new_fold_start:
+            trainer.reset_early_stopping_state()
+
+        # =================================================================
+        # LEARNING RATE SCHEDULING FOR LATER FOLDS
+        # =================================================================
+        # Folds 2-K use progressively lower starting learning rates,
+        # linearly interpolated from lr_initial (fold 2) toward min_lr.
+        # This prevents catastrophic forgetting of patterns learned in
+        # earlier folds while still allowing refinement.
+
+        #
+        # lr_step is calculated so that each fold including fold 5 and
+        # the final fold have room to descend to min_lr, allowing some
+        # annealing between folds.
+        #
+
+        # Fold 1: learning_rate (training from scratch)
+        # Fold 2: lr_initial (first refinement from checkpoint)
+        # Fold 3: lr_initial - 1*lr_step
+        # ...
+        # Fold K: min_lr + lr_step (one step above floor)
+        # =================================================================
+        if fold > 1 and is_new_fold_start:
             lr_range = hp["lr_initial"] - hp["min_lr"]
             lr_step = lr_range / (
                 n_splits - 1
-            )  # -1 since first fold uses original lr
+            )  # Example: 3 intervals for folds 2→3→4→5
             new_lr = (
-                hp["lr_initial"] - (fold - 1) * lr_step
-            )  # fold-1 since we start at fold 1
+                hp["lr_initial"] - (fold - 2) * lr_step
+            )  # fold 2 uses lr_initial
             trainer.reset_learning_rate(new_lr=new_lr)
             hp["lr_decay"] = hp["fold_lr_decay"]
+            # Enable hold period for later folds to stabilize after checkpoint load
+            hp["hold_steps"] = hp.get("fold_hold_steps", 0)
             logger.info(
-                f"Adjusted learning rate for fold {fold+1}: lr={new_lr}, min_lr={hp['min_lr']}, decay={hp['lr_decay']}"
+                f"Adjusted learning rate for fold {fold}: lr={new_lr}, hold_steps={hp['hold_steps']}, decay={hp['lr_decay']}"
+            )
+            trainer.configure_scheduler()  # rebuild scheduler with new hold_steps
+        elif is_new_fold_start:
+            # Fold 1: no hold period needed when training from scratch
+            hp["hold_steps"] = 0
+            logger.info(
+                f"Fold {fold}/{n_splits}: using initial lr={hp['lr_initial']}"
             )
         else:
-            logger.info(f"Resuming learning rate for fold {fold+1}")
+            logger.info(f"Fold {fold}/{n_splits}: resuming from checkpoint")
 
-        # Mark this fold as started
+        # Mark this fold as started (for recovery)
         with open(fold_start_file, "w") as f:
-            f.write(f"Fold {fold+1} started")
+            f.write(f"Fold {fold} started")
 
         trainer.train(max_epochs=500)
 
-        # Find peak mAP epoch achieved so far
-        # After trainer.train() completes for each fold:
+        # =================================================================
+        # CHECKPOINT SELECTION - GLOBAL BEST TRACKING
+        # =================================================================
+        # Compare this fold's best to global best across all folds.
+        # Only the true global best is retained; later checkpoints are cleaned up.
+        # =================================================================
         trainer.summary_writer.flush()
         trainer.summary_writer.close()
 
-        # Use Trainer's tracked best epoch when in mAP mode
-        if (
-            hp.get("early_stop_metric") == "mAP"
-            and trainer.best_raw_map_epoch is not None
-        ):
-            logger.info(
-                f"Peak mAP {trainer.best_raw_map:.4f} at epoch {trainer.best_raw_map_epoch}"
-            )
-            cleanup_checkpoints(checkpoint_dir, trainer.best_raw_map_epoch)
-        elif available_testsets:
-            # Fallback to log parsing for val_loss mode with testsets
-            time.sleep(1)
-            best_epoch = find_peak_map_epoch(
-                log_path,
-                available_testsets,
-                trainer.epoch,
-                hp["early_stopping_patience"] + 1,
-            )
-            if best_epoch is not None:
-                logger.info(f"Peak mAP achieved at epoch {best_epoch}")
-                cleanup_checkpoints(checkpoint_dir, best_epoch)
+        if getattr(trainer, "best_checkpoint_epoch", None) is not None:
+            fold_best_epoch = trainer.best_checkpoint_epoch
+            fold_best_value = trainer.best_checkpoint_value
+
+            # Determine if this fold's best beats global best
+            update_global = False
+            if global_best_value is None:
+                update_global = True
+            elif early_stop_metric == "mAP":
+                update_global = (
+                    fold_best_value > global_best_value
+                )  # higher is better
+            else:  # val_loss - lower is better
+                update_global = fold_best_value < global_best_value
+
+            if update_global:
+                global_best_epoch = fold_best_epoch
+                global_best_value = fold_best_value
+                save_global_best(
+                    global_best_file, global_best_epoch, global_best_value
+                )
+                logger.info(
+                    f"New global best: epoch {global_best_epoch} "
+                    f"({early_stop_metric}={global_best_value:.4f})"
+                )
             else:
-                logger.warning("Could not determine peak mAP epoch")
+                logger.info(
+                    f"Fold {fold} best (epoch {fold_best_epoch}, "
+                    f"{early_stop_metric}={fold_best_value:.4f}) "
+                    f"did not beat global best (epoch {global_best_epoch}, "
+                    f"{early_stop_metric}={global_best_value:.4f})"
+                )
+
+            cleanup_checkpoints(checkpoint_dir, global_best_epoch)
+        #            best_epoch = global_best_epoch  # for fold_results
+        else:
+            # No evaluations occurred (unusual—only if max_epochs=0 or similar)
+            logger.warning(
+                "No checkpoint tracking during training—using final epoch"
+            )
+        #            best_epoch = trainer.epoch
 
         fold_results.append(
             {
                 "fold": fold,
+                # use getattr() to handle older versions of Trainer and checkpoints
+                "fold_best_epoch": getattr(
+                    trainer, "best_checkpoint_epoch", None
+                ),
+                "fold_best_value": getattr(
+                    trainer, "best_checkpoint_value", None
+                ),
+                "global_best_epoch": global_best_epoch,
+                "global_best_value": global_best_value,
                 "best_validation_loss": trainer.best_validation_loss,
             }
         )
@@ -527,7 +484,7 @@ def cross_validate(
         new_lr = hp["min_lr"] + lr_step * hp["full_dataset_lr_boost"]
         hp["lr_decay"] = hp["final_lr_decay"]
         logger.info(
-            f"Adjusted learning rate for fold {fold+1}: lr={new_lr}, min_lr={hp['min_lr']}, decay={hp['lr_decay']}"
+            f"Adjusted learning rate for final full run: lr={new_lr}, min_lr={hp['min_lr']}, decay={hp['lr_decay']}"
         )
         full_trainer.reset_learning_rate(new_lr=new_lr)
     else:
@@ -545,6 +502,8 @@ def cross_validate(
     fold_results.append(
         {
             "fold": "full",
+            "best_epoch": full_trainer.best_checkpoint_epoch,
+            "best_checkpoint_value": full_trainer.best_checkpoint_value,
             "best_validation_loss": full_trainer.best_validation_loss,
         }
     )
@@ -575,6 +534,7 @@ def _main() -> None:
     args = parser.parse_args()
     model_dir = args.model_dir
     run_id = args.runid
+    start_time = time.time()
 
     logger = create_logger()
     hp = load_hparams(os.path.join(model_dir, "config/hparams_prod.yaml"))
@@ -653,6 +613,12 @@ def _main() -> None:
         logger.info(
             f"Fold {result['fold']} - Best Validation Loss: {result['best_validation_loss']}"
         )
+    elapsed = time.time() - start_time
+    hours, remainder = divmod(elapsed, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    logger.info(
+        f"Total training time: {int(hours)}h {int(minutes)}m {seconds:.1f}s"
+    )
 
 
 if __name__ == "__main__":
