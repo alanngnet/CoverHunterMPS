@@ -246,17 +246,16 @@ Optional flag to activate this script's original default behavior of re-using an
 
 ## Production Training
 
-Once you have tuned your data and your hyperparameters for optimal training results, you may be ready to train a model that knows *all* of your data, without reserving any data for validation and test sets. The tools/train_prod.py script uses stratified K-fold cross validation to dynamically generate validation sets from your dataset so that the model is exposed to all works and perfs equally. It concludes with one final training run on the entire dataset in which the dataset you specify in `test_path` serves as the validation dataset (for early stopping purposes). This final validation set should be entirely unseen perfs, even if some or all of the works are represented in the training data.
+Once you have tuned your data and your hyperparameters for optimal training results, you may be ready to train a model that knows *all* of your data, without reserving any data for validation and test sets. The tools/train_prod.py script uses stratified K-fold cross validation to dynamically generate validation sets from your dataset so that the model is exposed to all works and perfs equally. It concludes with one final training run on the entire dataset in which the dataset you specify in `test_path` serves as the validation dataset (for early stopping purposes). This final validation set, which you need to construct yourself, should be entirely unseen perfs, even if some or all of the works are represented in the training data.
 
-Use the `full.txt` output from `extract_csi_features.py` for your `train_path` with `val_data_split`, `val_unseen`, `test_data_split`, and `test_data_unseen` all set to 0. Prepare the `training/covers80/hparams_prod.yaml` file following the instructions in the comment header of `train_prod.py`. An example `hparams_prod.yaml` is provided for using covers80 for testing purposes.
+Use the `full.txt` output from `extract_csi_features.py` for your `train_path` with `val_data_split`, `val_unseen`, `test_data_split`, and `test_data_unseen` all set to 0. Prepare the `training/covers80/hparams_prod.yaml` file following the instructions in the comment header of `train_prod.py`. An example `hparams_prod.yaml` is provided for using covers80 for testing purposes. See the extensive comments in `hparams_prod.yaml` for further instructions regarding configuration options.
 
-You may need to experiment with learning rates and other hyperparameters for the somewhat different training situation of training on your full dataset if your hyperparameter tuning work used significantly smaller datasets. Also consider experimenting with the hard-coded learning-rate strategy for later folds after the first fold that is configured within `train_prod.py` in the `cross_validate()` function. Look for the comment line "# different learning-rate strategy for all folds after the first."
+You may need to experiment with learning rates and other hyperparameters for the somewhat different training situation of training on your full dataset if your hyperparameter tuning work used significantly smaller datasets. Also consider experimenting with the hard-coded learning-rate strategy for later folds after the first fold that is configured within `train_prod.py` in the `cross_validate()` function. Look for the comment line "# LEARNING RATE SCHEDULING FOR LATER FOLDS."
 
 Launch training with:
 ```
 python -m tools.train_prod training/covers80/ --runid='test of production training'
 ```
-
 You can safely interrupt production training for any reason and re-launching it with the same command will resume from the last fold and checkpoint that was automatically saved by this script. See also "how to fork a production training run with a new fold" below.
 
 TensorBoard will show each fold as a separate run, but within a continuous progression of epochs. If you run a lot of epochs, identifying your best epochs in Tensorboard can be tedious. You may find it easier to interpret your results using the `report_prod_logs` utility. First edit the TESTSETS line near the top of the script to define which test sets you want to report on. Then run:
@@ -302,15 +301,15 @@ BEST EPOCHS BY AVERAGE mAP (all test sets)
 
 Let's say you like your model's achievement at the checkpoint from epoch 20 in fold 1, but you've changed something like hyperparameters or code and want to restart a new fold 2 from that checkpoint:
 1. Delete or move the `do_` and `g_` checkpoint files numbered beyond 20 in the `prod_checkpoints` folder.
-2. Edit or confirm that `active_fold.txt` is present and contains "0" (the index for fold 1).
-3. Delete the old `fold_2_started.txt` and any higher-numbered `fold_N_started.txt` files.
-4. Delete the old `train_fold_2.txt` and any higher-numbered `train_fold_N.txt` files.
-4. Delete the old `val_fold_2.txt` and any higher-numbered `val_fold_N.txt` files.
+2. Edit or confirm that `active_fold.txt` is present and contains "1" (the index for fold 1).
+3. Edit 'global_best.json' to match the best epoch and mAP or loss so far as of your epoch 20.
+4. Delete the old `fold_2_started.txt` and any higher-numbered `fold_N_started.txt` files.
 5. Delete the old `full_dataset_started.txt` file if present.
 6. Restart training, and distinguish this fork by using a different `runid`, for example if you previously used 'prodv1.0' perhaps now:
 ```
 python -m tools.train_prod training/covers80/ --runid='prodv1.1'
 ```
+You can leave in place or delete the train and val data split files. As long as your random seed is the same, they will be regenerated identically.
 
 ## Generate Reference Embeddings
 
