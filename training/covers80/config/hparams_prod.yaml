@@ -70,7 +70,8 @@ learning_rate: 0.001
 adam_b1: 0.9
 adam_b2: 0.999
 lr_decay: 0.99  # CoverHunter used 0.9975 but that's for very large datasets
-min_lr: 0.0001
+min_lr: 0.00001 # Advice: Set to the lowest LR value where you see validation
+                # metrics and training losses stop improving
 warmup: False
 warmup_steps: 20000
 # hold_steps: Number of training steps to hold at the initial learning rate
@@ -115,14 +116,18 @@ early_stopping_patience: 3
 ### Training parameters only used by train_prod
 k_folds: 5                   # number of folds for cross-validation
 lr_initial: 0.0001           # starting learning rate for fold 2 (fold 1 uses learning_rate)
-                             # so that each fold's initial learning decays toward min_lr
+                             # so that each fold's initial LR decays toward min_lr
 # fold_hold_steps: Used only for folds 2-K
 #   to help folds adapt after loading checkpoints from previous folds,
 #   where aggressive early decay can hurt convergence. 
+#   Early stopping for this fold will not start monitoring until after fold_hold_steps.
 fold_hold_steps: 2000
 fold_lr_decay: 0.9925        # learning rate decay for folds 2-K
 final_lr_decay: 0.9925       # learning rate decay for final full dataset training
-full_dataset_lr_boost: 2     # add to min_lr this multiple of lr_step by this for the full dataset training run
+final_fold_position: 4.5       # position in exponential LR sequence 
+                             # where 2 = fold 2 initial LR = lr_initial
+                             # Suggested default: use k_folds - 0.5
+                             # meaning halfway between the initial LR of fold K and min_lr
 final_early_stopping_patience: 10  # recommend longer patience for final full dataset training
 
 

@@ -46,8 +46,9 @@ class UserDefineExponentialLR(torch.optim.lr_scheduler._LRScheduler):
             self._warmup_steps = warmup_steps
             self.get_lr()
         elif hold_steps > 0:
-            print(
-                f"Using LR hold period: {hold_steps} steps before decay (starting from step {self._internal_step_count})"
+            import logging
+            logging.getLogger(__name__).debug(
+                f"Scheduler configured with hold_steps={hold_steps}"
             )
 
     def get_lr(self):

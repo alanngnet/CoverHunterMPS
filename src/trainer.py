@@ -386,6 +386,16 @@ class Trainer:
             "scheduler_step_count", 0
         )
 
+    @property
+    def in_hold_period(self) -> bool:
+        """Check if scheduler is in hold period (early stopping paused)."""
+        if not hasattr(self, "scheduler") or self.scheduler is None:
+            return False
+        hold_steps = self.hp.get("hold_steps", 0)
+        if hold_steps <= 0:
+            return False
+        return getattr(self.scheduler, "_internal_step_count", 0) < hold_steps
+
     def reset_early_stopping_state(self) -> None:
         """Reset early stopping state for new training phases (e.g., new folds).
         Does NOT lose memory of best mAP and checkpoint so far.
@@ -482,19 +492,29 @@ class Trainer:
         )
 
         if data_type == "val":
+            early_stop_metric = self.hp.get("early_stop_metric", "val_loss")
             if validation_loss < self.best_validation_loss:
                 self.best_validation_loss = validation_loss
                 self.early_stopping_counter = 0
                 # Update checkpoint tracking for val_loss mode
-                if self.hp.get("early_stop_metric", "val_loss") == "val_loss":
+                if early_stop_metric == "val_loss":
                     self.best_checkpoint_epoch = self.epoch
                     self.best_checkpoint_value = validation_loss
-                    self.logger.info(
-                        f"New best checkpoint (val_loss): epoch {self.epoch} "
-                        f"with loss={validation_loss:.6f}"
-                    )
             else:
-                self.early_stopping_counter += 1
+                if self.in_hold_period:
+                    self.logger.debug(
+                        "Hold period active: skipping early stopping increment"
+                    )
+                else:
+                    self.early_stopping_counter += 1
+
+            # Log val_loss stopping status (parallel to mAP stopping check)
+            if early_stop_metric == "val_loss":
+                self.logger.info(
+                    f"val_loss stopping check: loss={validation_loss:.6f}, "
+                    f"best={self.best_validation_loss:.6f}, "
+                    f"patience={self.early_stopping_counter}/{self.hp.get('early_stopping_patience', 20)}"
+                )
 
     def eval_and_log(self):
         """
@@ -673,12 +693,18 @@ class Trainer:
             self.best_smoothed_map = smoothed
             self.map_stopping_counter = 0
         else:
-            self.map_stopping_counter += 1
+            if self.in_hold_period:
+                self.logger.debug(
+                    "Hold period active: skipping mAP early stopping increment"
+                )
+            else:
+                self.map_stopping_counter += 1
 
+        hold_status = " [HOLD]" if self.in_hold_period else ""
         self.logger.info(
             f"mAP stopping check: raw={raw_map:.4f}, smoothed={smoothed:.4f}, "
             f"best_smoothed={self.best_smoothed_map:.4f}, "
-            f"patience={self.map_stopping_counter}/{self.hp.get('early_stopping_patience', 5)}"
+            f"patience={self.map_stopping_counter}/{self.hp.get('early_stopping_patience', 5)}{hold_status}"
         )
 
     def train(self, max_epochs):
@@ -744,6 +770,10 @@ class Trainer:
                 self.logger.info(
                     f"Benchmark testsets (not used for stopping): {benchmark_testsets}"
                 )
+        else:
+            self.logger.info(
+                f"Using val_loss-based early stopping with patience={patience}"
+            )
 
         first_eval = self.first_eval
         for epoch in range(max(0, 1 + self.epoch), max_epochs):

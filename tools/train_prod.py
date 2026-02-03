@@ -97,7 +97,12 @@ import torch.multiprocessing as mp
 from sklearn.model_selection import StratifiedKFold
 from src.trainer import Trainer
 from src.model import Model
-from src.utils import create_logger, get_hparams_as_string, load_hparams
+from src.utils import (
+    create_logger,
+    get_hparams_as_string,
+    load_hparams,
+    line_to_dict,
+)
 from src.dataset import AudioFeatDataset, read_lines
 
 # from tensorboard.backend.event_processing.event_accumulator import (
@@ -198,14 +203,18 @@ def cross_validate(
     (lowest val_loss or highest raw mAP). Checkpoints after the selected
     best epoch are cleaned up to save disk space.
 
+
     Learning Rate Strategy
     ----------------------
-    Folds after the first use progressively lower learning rates, linearly
-    interpolated from hp["lr_initial"] to hp["min_lr"]. This prevents
-    catastrophic forgetting of patterns learned in earlier folds.
+    Folds after the first use exponentially decaying starting learning rates,
+    from hp["lr_initial"] (fold 2) toward hp["min_lr"] (treated as virtual
+    fold K+1). This front-loads learning into early folds - note that only fold 2
+    introduces unseen data to the model - and ensures every fold retains
+    headroom to anneal toward min_lr during training.
 
-    The final full-dataset run uses hp["full_dataset_lr_boost"] to set
-    a learning rate slightly above the minimum.
+    The final full-dataset run uses hp["final_fold_position"] to place it
+    within the exponential LR schedule. Default is k_folds - 0.5, giving
+    a starting LR halfway between fold K and min_lr (in log space).
 
     Resumption
     ----------
@@ -220,20 +229,10 @@ def cross_validate(
     data_lines = read_lines(hp["train_path"])
 
     # Load the dataset once for splitting purposes
-    initial_dataset = AudioFeatDataset(
-        hp,
-        data_path=None,
-        data_lines=data_lines,
-        train=False,  # No augmentation at this point
-        mode=hp["mode"],
-        chunk_len=hp["chunk_frame"][0] * hp["mean_size"],
-    )
-
     # Extract labels
-    labels = extract_labels(initial_dataset)
-
+    labels = np.array([line_to_dict(line)["work_id"] for line in data_lines])
     # Generate indices for stratified k-fold
-    indices = np.arange(len(initial_dataset))
+    indices = np.arange(len(data_lines))
 
     # Save folds in case training needs to be restarted after an interruption
     fold_indices_file = os.path.join(model_dir, "fold_indices.json")
@@ -317,38 +316,37 @@ def cross_validate(
         trainer.load_model()
         trainer.configure_scheduler()
 
-        # Reset early stopping state for new folds
+        # Reset state for new folds
         if is_new_fold_start:
             trainer.reset_early_stopping_state()
 
         # =================================================================
         # LEARNING RATE SCHEDULING FOR LATER FOLDS
         # =================================================================
-        # Folds 2-K use progressively lower starting learning rates,
-        # linearly interpolated from lr_initial (fold 2) toward min_lr.
-        # This prevents catastrophic forgetting of patterns learned in
-        # earlier folds while still allowing refinement.
-
+        # Folds 2-K use exponentially decaying starting learning rates,
+        # with min_lr treated as a virtual "fold K+1" endpoint. This
+        # ensures fold K retains headroom to anneal toward min_lr.
         #
-        # lr_step is calculated so that each fold including fold 5 and
-        # the final fold have room to descend to min_lr, allowing some
-        # annealing between folds.
+        # Exponential spacing front-loads learning capacity: the largest
+        # LR delta occurs fold 2→3, with progressively smaller deltas
+        # for later fine-tuning folds.
         #
-
-        # Fold 1: learning_rate (training from scratch)
-        # Fold 2: lr_initial (first refinement from checkpoint)
-        # Fold 3: lr_initial - 1*lr_step
-        # ...
-        # Fold K: min_lr + lr_step (one step above floor)
+        # Example with lr_initial=0.00015, min_lr=0.00003, K=5:
+        #   Fold 2: 0.000150
+        #   Fold 3: 0.000100 (Δ=0.000050, largest)
+        #   Fold 4: 0.000067 (Δ=0.000033)
+        #   Fold 5: 0.000045 (Δ=0.000022, smallest)
+        #   (Fold 6 virtual): 0.000030 = min_lr
         # =================================================================
+
         if fold > 1 and is_new_fold_start:
-            lr_range = hp["lr_initial"] - hp["min_lr"]
-            lr_step = lr_range / (
-                n_splits - 1
-            )  # Example: 3 intervals for folds 2→3→4→5
-            new_lr = (
-                hp["lr_initial"] - (fold - 2) * lr_step
-            )  # fold 2 uses lr_initial
+            # Exponential interpolation from lr_initial (fold 2) toward min_lr
+            # Treat min_lr as virtual "fold K+1" so fold K retains descent headroom
+            num_intervals = n_splits - 1  # fold 2 through virtual fold K+1
+            decay_ratio = (hp["min_lr"] / hp["lr_initial"]) ** (
+                1.0 / num_intervals
+            )
+            new_lr = hp["lr_initial"] * (decay_ratio ** (fold - 2))
             trainer.reset_learning_rate(new_lr=new_lr)
             hp["lr_decay"] = hp["fold_lr_decay"]
             # Enable hold period for later folds to stabilize after checkpoint load
@@ -476,16 +474,20 @@ def cross_validate(
     # Adjust learning rate for full dataset training if it's a new start
     # let full dataset have a little more learning rate than the final folds did
     if is_new_full_start:
-        # recalculate in case resuming after an interruption
-        lr_range = hp["lr_initial"] - hp["min_lr"]
-        lr_step = lr_range / (
-            n_splits - 1
-        )  # -1 since first fold uses original lr
-        new_lr = hp["min_lr"] + lr_step * hp["full_dataset_lr_boost"]
+        # Position final run in exponential LR schedule
+        # Default: halfway between fold K and min_lr (virtual fold K+1)
+        num_intervals = n_splits - 1
+        decay_ratio = (hp["min_lr"] / hp["lr_initial"]) ** (
+            1.0 / num_intervals
+        )
+        final_position = hp.get("final_fold_position", n_splits - 0.5)
+        new_lr = hp["lr_initial"] * (decay_ratio ** (final_position - 2))
         hp["lr_decay"] = hp["final_lr_decay"]
+        hp["hold_steps"] = hp.get("fold_hold_steps", 0)
         logger.info(
             f"Adjusted learning rate for final full run: lr={new_lr}, min_lr={hp['min_lr']}, decay={hp['lr_decay']}"
         )
+        full_trainer.configure_scheduler()  # rebuild scheduler with final_lr_decay
         full_trainer.reset_learning_rate(new_lr=new_lr)
     else:
         logger.info("Resuming learning rate for full dataset training")
