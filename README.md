@@ -125,15 +125,14 @@ To add more benchmarking test sets to your project for use in training or evalua
     python -m tools.extract_csi_features data/covers80_testset
     ```
    * The important output from that is `full.txt` and the `cqt_feat` subfolder's contents, which are referred to as path names in the `full.txt` file. 
-2. The name of the test set must be included in `src/trainer.py` in the `ALL_TEST_SETS` configuration line near the top of that script. In the following steps, let's use the example test set name `your_new_testset`.
-3. To use the test set in training, add these lines in your `training/[projectname]/config/hparams.yaml` and - if you use the `train_prod.py` script - also the `training/[projectname]/config/hparams_prod.yaml` file:
+2. To use the test set in training, add these lines in your `training/[projectname]/config/hparams.yaml` and - if you use the `train_prod.py` script - also the `training/[projectname]/config/hparams_prod.yaml` file:
     ```
     your_new_testset:
       query_path: "data/your_new_testset/full.txt"
       ref_path: "data/your_new_testset/full.txt"
       every_n_epoch_to_test: 1
     ```
-4. If you use the `train_tune.py` script, you might decide that this new test set is the one you want summary mAP analytics for, in which case set the `test_name` hyperparameter in   `training/[projectname]/config/hp_tuning.yaml` to match the `your_new_testset` name from step 2 above.
+3. If you use the `train_tune.py` script, you might decide that this new test set is the one you want summary mAP analytics for, in which case set the `test_name` hyperparameter in   `training/[projectname]/config/hp_tuning.yaml` to match the `your_new_testset` name from step 2 above.
 
 ## Hyperparameter Tuning
 
