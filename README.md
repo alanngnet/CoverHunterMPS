@@ -174,7 +174,7 @@ If you are running on a CUDA platform, the `make_deterministic()` function in to
 
 ## Evaluation
 
-This script evaluates your trained model by providing standard mAP (mean average precision) and MR1 (mean rank one) training metrics, plus an optional t-SNE clustering plot (compare Fig. 3 in the CoverHunter paper).
+This script evaluates your trained model by providing standard mAP (mean average precision), MR1 (mean rank one), and hit rate training metrics, plus an optional t-SNE clustering plot (compare Fig. 3 in the CoverHunter paper).
 
 1. Have a pre-trained CoverHunter model's output checkpoint files available. You only need your best `g_000NNNN` file (typically your highest-numbered one).
     * If you use original CoverHunter's pre-trained model from https://drive.google.com/file/d/1rDZ9CDInpxQUvXRLv87mr-hfDfnV7Y-j/view (65 MB):
@@ -194,9 +194,10 @@ This script evaluates your trained model by providing standard mAP (mean average
     ```
     python -m tools.eval_testset training/covers80 \
         data/covers80_testset/full.txt data/covers80_testset/full.txt \
-        -plot_name="training/covers80/tSNE.png" \
-        -dist_name='distmatrix' \
-        -test_only_labels='data/covers80/test-only-work-ids.txt' \
+        -plot_name "training/covers80/tSNE.png" \
+        -dist_name 'distmatrix' \
+        -test_only_labels 'data/covers80/test-only-work-ids.txt' \
+        --bootstrap 1000
         --reuse-embeddings
     ```
     - Example if you are using the CoverHunter pretrained model and just want the covers80 metrics:
@@ -239,6 +240,9 @@ The optional `dist_name` argument is a path where you want to save the distance 
 
 #### marks
 The default value for the optional `marks` argument is 'markers', which makes the output for `plot_name` differentiate works by using using standard matplotlib markers in various colors and shapes. The alternative value is 'ids' which uses the `work_id` numbers defined by extract_csi_features instead of matplotlib markers.
+
+#### bootstrap
+Optional. Include to add computation of the 95% confidence intervals and standard deviation for all of the output metrics. You must specify the N value for iterations to compute. Recommended standard value is 1000. Adding this parameter will slow down this script's output considerably.
 
 #### reuse-embeddings
 Optional flag to activate this script's original default behavior of re-using any existing embeddings in the temporary embeddings folder created by and for this script's use. Use this **only** if you are certain that none of the tests et data and none of the hyperparameters have changed since the existing embeddings were generated, otherwise the metrics from this script will be misleading. The reason to use it in that case would be for very large test sets where reducing evaluation compute time for repeated evaluations is a consideration.
