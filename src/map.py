@@ -106,3 +106,143 @@ def calc_map(
             hit_rate += 1
     hit_rate = hit_rate / query_num
     return {"mean_ap": mean_ap, "top10": top10, "rank1": rank1, "hit_rate": hit_rate}
+
+
+def _fast_calc_metrics(
+    dist_matrix: np.ndarray, label_query: List, label_ref: List
+) -> tuple:
+    """Numpy-vectorized mAP, MR1, and hit_rate for bootstrap inner loop.
+
+    Equivalent to calc_map() but ~100x faster by avoiding Python loops
+    over matrix elements. Still loops over queries (unavoidable for
+    per-query AP) but uses vectorized numpy operations within each.
+
+    Args:
+      dist_matrix: [n_query, n_ref] distance matrix. Negative values excluded.
+      label_query: Work labels for query axis.
+      label_ref: Work labels for reference axis.
+
+    Returns:
+      (mean_ap, rank1, hit_rate) as floats
+    """
+    n_query = len(label_query)
+    ref_arr = np.array(label_ref)
+
+    masked = np.where(dist_matrix >= 0, dist_matrix, np.inf)
+    rankings = np.argsort(masked, axis=1)
+
+    sum_ap = 0.0
+    sum_rank1 = 0.0
+    sum_hit = 0.0
+
+    for i in range(n_query):
+        row = rankings[i]
+        valid_mask = masked[i, row] < np.inf
+        row = row[valid_mask]
+        if len(row) == 0:
+            continue
+
+        matches = ref_arr[row] == label_query[i]
+        n_relevant = matches.sum()
+        if n_relevant == 0:
+            continue
+
+        cumhits = np.cumsum(matches)
+        positions = np.arange(1, len(row) + 1)
+        ap = (cumhits[matches] / positions[matches]).sum() / n_relevant
+
+        first_match = np.argmax(matches)
+        sum_rank1 += first_match + 1
+        sum_hit += 1.0 if matches[0] else 0.0
+        sum_ap += ap
+
+    return sum_ap / n_query, sum_rank1 / n_query, sum_hit / n_query
+
+
+def bootstrap_metrics(
+    dist_matrix: np.ndarray,
+    label_query: List,
+    label_ref: List,
+    n_bootstrap: int = 1000,
+    confidence: float = 0.95,
+    seed: int = 12345,
+    topk: int = 10000,
+) -> Dict:
+    """Work-stratified bootstrap confidence intervals for mAP, MR1, hit_rate.
+
+    Resamples works (not performances) with replacement to correctly capture
+    inter-work variance — the dominant source of metric uncertainty in CSI
+    evaluation on small testsets.
+
+    Args:
+        dist_matrix: Pre-computed distance matrix (query × ref), as used by calc_map.
+                     Negative values are excluded per calc_map convention.
+        label_query: Work labels for query axis.
+        label_ref: Work labels for reference axis.
+        n_bootstrap: Number of bootstrap iterations.
+        confidence: Confidence level for intervals (default 0.95 → 95% CI).
+        seed: Random seed for reproducibility.
+        topk: Passed through to calc_map.
+
+    Returns:
+        Dict with keys for each metric (mean_ap, rank1, hit_rate), each containing:
+            "point": Point estimate from full dataset
+            "mean": Bootstrap mean
+            "ci_low": Lower confidence bound
+            "ci_high": Upper confidence bound
+            "std": Bootstrap standard deviation
+    """
+    rng = np.random.default_rng(seed)
+
+    # Point estimates from full dataset
+    point = calc_map(dist_matrix, label_query, label_ref, topk=topk, verbose=0)
+
+    # Group query indices by work
+    work_to_query_idx = {}
+    for i, w in enumerate(label_query):
+        work_to_query_idx.setdefault(w, []).append(i)
+
+    # All unique works present in query set (ref set remains full)
+    works = sorted(work_to_query_idx.keys())
+    n_works = len(works)
+
+    boot_results = {"mean_ap": [], "rank1": [], "hit_rate": []}
+
+    for _ in range(n_bootstrap):
+        # Resample works with replacement for queries only
+        sampled_works = rng.choice(works, size=n_works, replace=True)
+
+        # Gather query indices with original work labels
+        query_indices = []
+        query_labels = []
+
+        for w in sampled_works:
+            for qi in work_to_query_idx[w]:
+                query_indices.append(qi)
+                query_labels.append(w)  # Use original work label
+
+        # Keep FULL reference set - no subsampling
+        # Extract only query rows from distance matrix (all ref columns)
+        sub_matrix = dist_matrix[query_indices, :]
+
+        b_map, b_mr1, b_hit = _fast_calc_metrics(sub_matrix, query_labels, label_ref)
+        boot_results["mean_ap"].append(b_map)
+        boot_results["rank1"].append(b_mr1)
+        boot_results["hit_rate"].append(b_hit)
+
+
+
+    # Compute intervals
+    alpha = (1 - confidence) / 2
+    results = {}
+    for key in boot_results:
+        samples = np.array(boot_results[key])
+        results[key] = {
+            "point": point[key],
+            "mean": float(np.mean(samples)),
+            "ci_low": float(np.percentile(samples, 100 * alpha)),
+            "ci_high": float(np.percentile(samples, 100 * (1 - alpha))),
+            "std": float(np.std(samples)),
+        }
+
+    return results

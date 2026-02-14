@@ -56,6 +56,13 @@ def _main() -> None:
         action="store_true",
         help="Reuse existing embeddings in embed_NN_tmp if present (faster but risky if data or parameters have changed)",
     )
+    parser.add_argument(
+        "--bootstrap",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Work-stratified bootstrap iterations for 95%% confidence intervals on mAP, MR1, hit_rate. 0 disables. Typical: 1000.",
+    )
 
     args = parser.parse_args()
     model_dir = args.model_dir
@@ -120,6 +127,7 @@ def _main() -> None:
         marks=args.marks,
         dist_name=args.dist_name,
         reuse_embeddings=args.reuse_embeddings,
+        bootstrap=args.bootstrap,
     )
 
 

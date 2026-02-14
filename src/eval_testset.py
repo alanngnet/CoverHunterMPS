@@ -353,6 +353,7 @@ def eval_for_map_with_feat(
     dist_name="",
     test_only_labels=None,
     reuse_embeddings=False,
+    bootstrap=0,
 ):
     """compute map10 with trained model and query/ref loader(dataset loader
     can speed up process dramatically)
@@ -373,6 +374,11 @@ def eval_for_map_with_feat(
       dist_name: if a path is provided, save dist_matrix there
       test_only_labels: see explanation in _cluster_plot()
       marks: see explanation in _cluster_plot()
+      bootstrap: int, number of work-stratified bootstrap iterations for
+          confidence intervals on mAP, MR1, and hit_rate. 0 disables.
+          Resamples works (not performances) with replacement to correctly
+          capture inter-work variance. Operates on the pre-computed distance
+          matrix, so computational cost is negligible. Typical value: 1000.
 
     Returns:
       map10
@@ -581,6 +587,30 @@ def eval_for_map_with_feat(
         logger.info("map: {}".format(metrics["mean_ap"]))
         logger.info("rank1: {}".format(metrics["rank1"]))
         logger.info("hit_rate: {}\n".format(metrics["hit_rate"]))
+
+    if bootstrap:
+        from src.map import bootstrap_metrics
+
+        boot = bootstrap_metrics(
+            dist_matrix,
+            query_label,
+            ref_label,
+            n_bootstrap=bootstrap,
+            seed=12345,
+        )
+        if logger:
+            for key in ("mean_ap", "rank1", "hit_rate"):
+                b = boot[key]
+
+                logger.info(
+                    "Bootstrap %s: %.4f [%.4f, %.4f] (±%.4f) n=%d",
+                    key,
+                    b["point"],
+                    b["ci_low"],
+                    b["ci_high"],
+                    b["std"],
+                    bootstrap,
+                )
 
     return metrics["mean_ap"], metrics["hit_rate"], metrics["rank1"]
 
