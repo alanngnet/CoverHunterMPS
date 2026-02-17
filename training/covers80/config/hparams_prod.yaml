@@ -39,6 +39,11 @@ covers80:
 
 every_n_epoch_to_test: 1  # validate after every n epoch
 every_n_epoch_to_save: 1  # save model after every n epoch
+# bootstrap: Work-stratified bootstrap iterations for 95% confidence intervals
+# on mAP, MR1, and hit_rate. Runs automatically at each new-best checkpoint.
+# Reports how much your metrics might vary due to which tunes are in the testset.
+# 0 disables. 1000 is standard for publication. Cost is negligible (<1 sec).
+bootstrap: 1000
 
 ### Dataset parameters
 data_type: "cqt"  # raw or cqt or mel
@@ -96,8 +101,10 @@ hold_steps: 0
 #   map_stopping_testsets. Other testsets (defined above in this file)
 #   will be evaluated and logged but never influence training decisions,
 #   preserving their validity as held-out benchmarks.
+#   You must also set map_stopping_testsets below.
 early_stop_metric: "val_loss"
 early_stopping_patience: 3
+max_epochs: 500           # safety ceiling; early stopping normally terminates first
 
 # map_stopping_testsets: List of testset names that drive stopping decisions.
 #   Only used when early_stop_metric: "mAP"

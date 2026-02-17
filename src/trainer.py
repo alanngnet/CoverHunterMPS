@@ -81,10 +81,10 @@ class Trainer:
         Trainer class to organize the training methods.
 
         Supports two early stopping modes controlled by hp["early_stop_metric"]:
-        - "val_loss" (default): Stop when validation loss plateaus. All testsets
+        - "val_loss" (default): Stop when validation loss plateaus. All test sets
           remain uncontaminated benchmarks suitable for publication.
         - "mAP": Stop when smoothed mAP plateaus on hp["map_stopping_testsets"].
-          Testsets not in that list are benchmark-only (logged but never
+          Test sets not in that list are benchmark-only (logged but never
           influence training decisions), preserving research-grade separation.
 
         Args:
@@ -112,7 +112,7 @@ class Trainer:
             early_stopping_counter: int
                 Epochs since val_loss improvement.
             map_stopping_testsets: list[str]
-                Testsets that drive mAP-based stopping decisions.
+                Test sets that drive mAP-based stopping decisions.
             best_raw_map: float
                 Highest raw mAP observed on stopping testsets.
             best_raw_map_epoch: int or None
@@ -140,8 +140,8 @@ class Trainer:
         self.best_checkpoint_value = None  # Set in first evaluation
 
         # --- mAP-based early stopping state (used when early_stop_metric="mAP") ---
-        # Testsets in this list influence stopping/selection decisions.
-        # Testsets NOT in this list are benchmark-only (logged but never drive decisions).
+        # Test sets in this list influence stopping/selection decisions.
+        # Test sets NOT in this list are benchmark-only (logged but never drive decisions).
         self.map_stopping_testsets = [
             t for t in hp.get("map_stopping_testsets", []) if t in hp
         ]
@@ -150,8 +150,15 @@ class Trainer:
         self.best_raw_map_epoch = None
         self.smoothed_map = None  # None until first observation
         self.map_stopping_counter = 0
-        # Cache of most recent mAP scores by testset (for stopping calculation)
+        # Cache of most recent mAP scores by test set (for stopping calculation)
         self._current_epoch_map_scores = {}
+
+        # Bootstrap iterations for confidence intervals on mAP evaluation.
+        # 0 disables. Typical value: 1000. Runs on each new-best checkpoint.
+        self.bootstrap = hp.get("bootstrap", 0)
+        self._last_bootstrap_epoch = None  # dedup guard
+        if self.bootstrap > 0: # check backwards compatibility
+            from src.map import bootstrap_metrics  # noqa: F401 — fail fast
 
         self.test_sets = _discover_testsets(hp)
         if self.test_sets:
@@ -594,6 +601,14 @@ class Trainer:
         ):
             self._check_map_early_stopping()
 
+        # Bootstrap CIs on every new-best checkpoint (both val_loss and mAP modes)
+        if (
+            self.bootstrap > 0
+            and self.best_checkpoint_epoch == self.epoch
+        ):
+            self._run_bootstrap_evaluation()
+
+
     def aggregate_stopping_map_scores(
         self, map_scores: dict[str, float]
     ) -> float:
@@ -821,6 +836,11 @@ class Trainer:
         When every_n_epoch_to_test > 1, the final epoch may not have been
         evaluated. This forces evaluation so train_tune can report accurate
         final mAP in experiment summaries.
+
+        If hp["bootstrap"] > 0 and this epoch is the best checkpoint,
+        runs work-stratified bootstrap (uncertainty measurement) on all testsets.
+        The dedup guard in _run_bootstrap_evaluation prevents double-runs when
+        the final epoch was already bootstrapped during eval_and_log().
         """
         every_n = self.hp.get("every_n_epoch_to_test", 1)
         if every_n > 1 and self.epoch % every_n != 0:
@@ -868,6 +888,70 @@ class Trainer:
             # Restore original settings
             for testset_name, orig_val in original_every_n.items():
                 self.hp[testset_name]["every_n_epoch_to_test"] = orig_val
+
+        # Bootstrap CIs if final epoch is the best checkpoint
+        if (
+            self.bootstrap > 0
+            and self.best_checkpoint_epoch == self.epoch
+        ):
+            self._run_bootstrap_evaluation()
+
+
+    def _run_bootstrap_evaluation(self):
+        """Run work-stratified bootstrap confidence intervals on all testsets.
+
+        Called automatically when a new best checkpoint is detected during
+        training. Reuses embeddings already computed by eval_and_log(), so
+        the only cost is bootstrap resampling of the pre-computed distance
+        matrix (sub-second for typical testset sizes).
+
+        Controlled by hp["bootstrap"] (default 0 = disabled). Typical: 1000.
+        Results are logged but do not influence training decisions.
+
+        Includes a deduplication guard so that bootstrap never runs twice
+        for the same epoch (e.g., if _ensure_final_evaluation triggers a
+        forced evaluation at an epoch that was already a new-best).
+        """
+        if self.bootstrap <= 0 or not self.test_sets:
+            return
+        if self._last_bootstrap_epoch == self.epoch:
+            return  # already ran for this epoch
+        self._last_bootstrap_epoch = self.epoch
+
+        self.logger.info(
+            "New best checkpoint at epoch %d — computing bootstrap CIs (B=%d)",
+            self.epoch,
+            self.bootstrap,
+        )
+
+        for testset_name in self.test_sets:
+            hp_test = self.hp[testset_name]
+            save_name = hp_test.get("save_name", testset_name)
+            embed_dir = os.path.join(
+                self.model_dir, f"embed_{self.epoch}_{save_name}"
+            )
+            if not os.path.isdir(embed_dir):
+                self.logger.warning(
+                    "Bootstrap: embed dir %s not found, skipping %s",
+                    embed_dir,
+                    testset_name,
+                )
+                continue
+
+            query_in_ref_path = hp_test.get("query_in_ref_path", None)
+            eval_for_map_with_feat(
+                self.hp,
+                self.model,
+                embed_dir,
+                query_path=hp_test["query_path"],
+                ref_path=hp_test["ref_path"],
+                query_in_ref_path=query_in_ref_path,
+                batch_size=self.hp["batch_size"],
+                device=self.device,
+                logger=self.logger,
+                reuse_embeddings=True,
+                bootstrap=self.bootstrap,
+            )
 
 
 def save_checkpoint(

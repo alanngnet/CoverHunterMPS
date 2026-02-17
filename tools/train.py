@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+import time
 import torch
 import torch.multiprocessing as mp
 
@@ -50,6 +51,7 @@ def _main() -> None:
     first_eval = True if only_eval else first_eval
 
     logger = create_logger()
+    start_time = time.time()
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
 
     match hp["device"]:  # noqa requires python 3.10
@@ -85,7 +87,7 @@ def _main() -> None:
 
     torch.manual_seed(hp["seed"])
 
-    # Note only for distributed-computing use from original CoverHunter: 
+    # Note only for distributed-computing use from original CoverHunter:
     # We use map-reduce mode to update model when its parameters changed
     # (model.join), that means we do not need to wait one step of all gpu to
     # complete. Pytorch distribution support variable trained samples of different
@@ -117,7 +119,23 @@ def _main() -> None:
     t.load_model()
     t.configure_scheduler()
     t.reset_learning_rate()
-    t.train(max_epochs=100)
+    t.train(max_epochs=hp.get("max_epochs", 100))
+
+    # Final summary
+    early_stop_metric = hp.get("early_stop_metric", "val_loss")
+    if t.best_checkpoint_epoch is not None:
+        logger.info(
+            f"Training complete. Best checkpoint: epoch {t.best_checkpoint_epoch} "
+            f"({early_stop_metric}={t.best_checkpoint_value:.4f})"
+        )
+    else:
+        logger.info("Training complete.")
+    elapsed = time.time() - start_time
+    hours, remainder = divmod(elapsed, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    logger.info(
+        f"Total training time: {int(hours)}h {int(minutes)}m {seconds:.1f}s"
+    )
 
 
 if __name__ == "__main__":

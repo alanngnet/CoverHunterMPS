@@ -368,7 +368,7 @@ def cross_validate(
         with open(fold_start_file, "w") as f:
             f.write(f"Fold {fold} started")
 
-        trainer.train(max_epochs=500)
+        trainer.train(max_epochs=hp.get("max_epochs", 500))
 
         # =================================================================
         # CHECKPOINT SELECTION - GLOBAL BEST TRACKING
@@ -500,7 +500,7 @@ def cross_validate(
     with open(full_start_file, "w") as f:
         f.write("Full dataset training started")
 
-    full_trainer.train(max_epochs=500)
+    full_trainer.train(max_epochs=hp.get("max_epochs", 500))
     fold_results.append(
         {
             "fold": "full",
