@@ -147,7 +147,6 @@ class Trainer:
         ]
         self.best_smoothed_map = 0.0
         self.best_raw_map = 0.0
-        self.best_raw_map_epoch = None
         self.smoothed_map = None  # None until first observation
         self.map_stopping_counter = 0
         # Cache of most recent mAP scores by test set (for stopping calculation)
@@ -354,14 +353,13 @@ class Trainer:
         """Export early stopping state for checkpoint persistence."""
         return {
             "best_validation_loss": self.best_validation_loss,
-            "early_stopping_counter": self.early_stopping_counter,
-            "best_checkpoint_epoch": self.best_checkpoint_epoch,
-            "best_checkpoint_value": self.best_checkpoint_value,
             "best_raw_map": self.best_raw_map,
-            "best_raw_map_epoch": self.best_raw_map_epoch,
             "best_smoothed_map": self.best_smoothed_map,
             "smoothed_map": self.smoothed_map,
+            "early_stopping_counter": self.early_stopping_counter,
             "map_stopping_counter": self.map_stopping_counter,
+            "best_checkpoint_epoch": self.best_checkpoint_epoch,
+            "best_checkpoint_value": self.best_checkpoint_value,
             "scheduler_step_count": getattr(
                 self.scheduler, "_internal_step_count", 0
             ),
@@ -374,14 +372,17 @@ class Trainer:
         self.best_validation_loss = state.get(
             "best_validation_loss", float("inf")
         )
-        self.early_stopping_counter = state.get("early_stopping_counter", 0)
-        self.best_checkpoint_epoch = state.get("best_checkpoint_epoch")
-        self.best_checkpoint_value = state.get("best_checkpoint_value")
+        # backward compat: old checkpoints stored it separately;
+        # if best_checkpoint_epoch wasn't persisted, seed from best_raw_map_epoch):
+        if self.best_checkpoint_epoch is None:
+            self.best_checkpoint_epoch = state.get("best_raw_map_epoch")
         self.best_raw_map = state.get("best_raw_map", 0.0)
-        self.best_raw_map_epoch = state.get("best_raw_map_epoch")
         self.best_smoothed_map = state.get("best_smoothed_map", 0.0)
         self.smoothed_map = state.get("smoothed_map")
+        self.early_stopping_counter = state.get("early_stopping_counter", 0)
         self.map_stopping_counter = state.get("map_stopping_counter", 0)
+        self.best_checkpoint_epoch = state.get("best_checkpoint_epoch")
+        self.best_checkpoint_value = state.get("best_checkpoint_value")
         self.logger.info(
             f"Restored early stopping state: best_checkpoint_epoch={self.best_checkpoint_epoch}, "
             f"best_validation_loss={self.best_validation_loss:.6f}, "
@@ -447,6 +448,11 @@ class Trainer:
             time.time() - start,
         )
 
+    @staticmethod
+    def _fmt_loss(v: float) -> str:
+        """Format loss value: exponential notation if < 0.0001, else fixed 6dp."""
+        return f"{v:.4e}" if v < 1e-4 else f"{v:.6f}"
+
     def validate_one(self, data_type):
         """
         Compute validation or test loss for the current epoch.
@@ -507,6 +513,10 @@ class Trainer:
                 if early_stop_metric == "val_loss":
                     self.best_checkpoint_epoch = self.epoch
                     self.best_checkpoint_value = validation_loss
+                    self.logger.info(
+                        f"New best checkpoint (val_loss): epoch {self.epoch} "
+                        f"with val_loss={self._fmt_loss(validation_loss)}"
+                    )
             else:
                 if self.in_hold_period:
                     self.logger.debug(
@@ -518,8 +528,8 @@ class Trainer:
             # Log val_loss stopping status (parallel to mAP stopping check)
             if early_stop_metric == "val_loss":
                 self.logger.info(
-                    f"val_loss stopping check: loss={validation_loss:.6f}, "
-                    f"best={self.best_validation_loss:.6f}, "
+                    f"val_loss stopping check: loss={self._fmt_loss(validation_loss)}, "
+                    f"best={self._fmt_loss(self.best_validation_loss)}, "
                     f"patience={self.early_stopping_counter}/{self.hp.get('early_stopping_patience', 20)}"
                 )
 
@@ -694,8 +704,6 @@ class Trainer:
         # Track best raw mAP for checkpoint selection
         if raw_map > self.best_raw_map:
             self.best_raw_map = raw_map
-            self.best_raw_map_epoch = self.epoch
-            # Update unified checkpoint tracking
             self.best_checkpoint_epoch = self.epoch
             self.best_checkpoint_value = raw_map
             self.logger.info(
@@ -754,7 +762,7 @@ class Trainer:
             - self.epoch: Final epoch number
             - self.best_validation_loss: Best val loss (val_loss mode)
             - self.best_raw_map: Best mAP achieved (mAP mode)
-            - self.best_raw_map_epoch: Epoch of best mAP (mAP mode)
+            - self.best_checkpoint_epoch: Epoch of best checkpoint
 
         Note:
             When every_n_epoch_to_test > 1, forces a final mAP evaluation
@@ -816,7 +824,7 @@ class Trainer:
                         self.epoch,
                         patience,
                         self.best_raw_map,
-                        self.best_raw_map_epoch,
+                        self.best_checkpoint_epoch,
                     )
                     should_stop = True
 

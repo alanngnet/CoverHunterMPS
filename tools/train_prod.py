@@ -103,7 +103,7 @@ from src.utils import (
     load_hparams,
     line_to_dict,
 )
-from src.dataset import AudioFeatDataset, read_lines
+from src.dataset import read_lines
 
 # from tensorboard.backend.event_processing.event_accumulator import (
 #    EventAccumulator,
@@ -146,6 +146,39 @@ def save_global_best(filepath, epoch, value):
     """Persist global best checkpoint across abort/resume events."""
     with open(filepath, "w") as f:
         json.dump({"epoch": epoch, "value": value}, f)
+
+
+def save_lr_anchor(filepath, lr, fold, epoch):
+    """
+    Persist calibrated LR anchor for resumption. User should manually
+    delete lr_anchor if restarting training from an earlier fold 1 checkpoint.
+    """
+    with open(filepath, "w") as f:
+        json.dump(
+            {
+                "lr_anchor": lr,
+                "calibrated_from_fold": fold,
+                "calibrated_from_epoch": epoch,
+            },
+            f,
+            indent=2,
+        )
+
+
+def load_lr_anchor(filepath):
+    """
+    Load calibrated LR anchor if available.
+    Returns (lr, fold, epoch) or (None, None, None).
+    """
+    if os.path.exists(filepath):
+        with open(filepath, "r") as f:
+            data = json.load(f)
+        return (
+            data.get("lr_anchor"),
+            data.get("calibrated_from_fold"),
+            data.get("calibrated_from_epoch"),
+        )
+    return None, None, None
 
 
 def cleanup_checkpoints(checkpoint_dir, best_epoch):
@@ -207,14 +240,33 @@ def cross_validate(
     Learning Rate Strategy
     ----------------------
     Folds after the first use exponentially decaying starting learning rates,
-    from hp["lr_initial"] (fold 2) toward hp["min_lr"] (treated as virtual
+    from fold 2 (see next paragraph) toward hp["min_lr"] (treated as virtual
     fold K+1). This front-loads learning into early folds - note that only fold 2
     introduces unseen data to the model - and ensures every fold retains
     headroom to anneal toward min_lr during training.
 
+    Fold 2 auto-calibrates its starting LR from fold 1's best checkpoint epoch:
+    lr_fold2 = learning_rate * lr_decay^best_epoch. This anchors subsequent folds
+    at the empirically optimal LR from fold 1 rather than a manually guessed
+    lr_initial. hp["lr_initial"] serves as a fallback if global_best_epoch is
+    unavailable.
+
+    Folds 3-K interpolate exponentially from this anchor toward
+    hp["min_lr"] (treated as virtual fold K+1).
+
+    The hold_steps period at fold 2 start allows productive basin exploration
+    at the calibrated LR before fold_lr_decay descent begins.
+
     The final full-dataset run uses hp["final_fold_position"] to place it
     within the exponential LR schedule. Default is k_folds - 0.5, giving
     a starting LR halfway between fold K and min_lr (in log space).
+
+    The hold_steps period at each fold's start allows basin exploration at
+    the starting LR before fold_lr_decay descent begins.
+
+    The final full-dataset run uses hp["final_fold_position"] to place it
+    within the same exponential schedule, anchored at the calibrated fold 2 LR.
+    Default is k_folds - 0.5, halfway between fold K and min_lr in log space.
 
     Resumption
     ----------
@@ -268,6 +320,16 @@ def cross_validate(
     global_best_value = global_best["value"]
     early_stop_metric = hp.get("early_stop_metric", "val_loss")
 
+    # Load calibrated LR anchor from fold 2 if this is a resumed run
+    lr_anchor_file = os.path.join(model_dir, "lr_anchor.json")
+
+    lr_anchor, anchor_fold, anchor_epoch = load_lr_anchor(lr_anchor_file)
+    if lr_anchor is not None:
+        logger.info(
+            f"Restored lr_anchor={lr_anchor:.6f} "
+            f"(calibrated from fold {anchor_fold}, epoch {anchor_epoch}). "
+            f"Delete lr_anchor.json to override if resuming from an earlier fold 1 checkpoint."
+        )
     if global_best_epoch is not None:
         logger.info(
             f"Loaded global best: epoch {global_best_epoch}, "
@@ -323,30 +385,56 @@ def cross_validate(
         # =================================================================
         # LEARNING RATE SCHEDULING FOR LATER FOLDS
         # =================================================================
-        # Folds 2-K use exponentially decaying starting learning rates,
-        # with min_lr treated as a virtual "fold K+1" endpoint. This
-        # ensures fold K retains headroom to anneal toward min_lr.
+        # Fold 2's starting LR is auto-calibrated by reading the optimizer
+        # state from fold 1's best checkpoint — the LR where peak performance
+        # was empirically achieved. This value is stored as hp["lr_initial"]
+        # and persisted to disk so resumption works correctly. The idea is to
+        # set LR with a data-driven estimate of the stability threshold
+        # for the current loss landscape.
         #
-        # Exponential spacing front-loads learning capacity: the largest
-        # LR delta occurs fold 2→3, with progressively smaller deltas
-        # for later fine-tuning folds.
-        #
-        # Example with lr_initial=0.00015, min_lr=0.00003, K=5:
-        #   Fold 2: 0.000150
-        #   Fold 3: 0.000100 (Δ=0.000050, largest)
-        #   Fold 4: 0.000067 (Δ=0.000033)
-        #   Fold 5: 0.000045 (Δ=0.000022, smallest)
-        #   (Fold 6 virtual): 0.000030 = min_lr
+        # Folds 3-K start at exponentially interpolated LRs between
+        # hp["lr_anchor"] (the calibrated fold 2 anchor) and hp["min_lr"]
+        # (treated as a virtual fold K+1). This ensures the model explores
+        # the entire relevant range of LR during K-fold learning.
+        # The hold_steps period lets each fold explore the basin at the initial
+        # LR before fold_lr_decay descent begins.
         # =================================================================
 
+        if fold == 2 and is_new_fold_start and global_best_epoch is not None:
+            # Read the LR directly from the optimizer state loaded from fold 1's
+            # best checkpoint — the empirical LR where peak performance was achieved.
+            # Store as lr_initial so folds 3-K interpolate from this calibrated anchor.
+            lr_fold2 = trainer.optimizer.param_groups[0]["lr"]
+            if lr_fold2 > hp["min_lr"]:
+                lr_anchor = lr_fold2
+                save_lr_anchor(
+                    lr_anchor_file, lr_anchor, fold=1, epoch=global_best_epoch
+                )
+                logger.info(
+                    f"Auto-calibrated lr_anchor={lr_fold2:.6f} from "
+                    f"fold 1 best checkpoint (epoch {global_best_epoch})"
+                )
+            else:
+                logger.warning(
+                    f"Fold 1 best checkpoint LR={lr_fold2:.6f} <= min_lr "
+                    f"{hp['min_lr']:.6f}; folds 2-K will use uncalibrated fallback schedule"
+                )
+
         if fold > 1 and is_new_fold_start:
-            # Exponential interpolation from lr_initial (fold 2) toward min_lr
             # Treat min_lr as virtual "fold K+1" so fold K retains descent headroom
-            num_intervals = n_splits - 1  # fold 2 through virtual fold K+1
-            decay_ratio = (hp["min_lr"] / hp["lr_initial"]) ** (
+            effective_anchor = (
+                lr_anchor if lr_anchor is not None else hp["learning_rate"]
+            )
+            if lr_anchor is None:
+                logger.warning(
+                    "No LR anchor from fold 1; falling back to learning_rate "
+                    f"={hp['learning_rate']:.6f} as fold 2 anchor."
+                )
+            num_intervals = n_splits - 1
+            decay_ratio = (hp["min_lr"] / effective_anchor) ** (
                 1.0 / num_intervals
             )
-            new_lr = hp["lr_initial"] * (decay_ratio ** (fold - 2))
+            new_lr = effective_anchor * (decay_ratio ** (fold - 2))
             trainer.reset_learning_rate(new_lr=new_lr)
             hp["lr_decay"] = hp["fold_lr_decay"]
             # Enable hold period for later folds to stabilize after checkpoint load
@@ -359,7 +447,7 @@ def cross_validate(
             # Fold 1: no hold period needed when training from scratch
             hp["hold_steps"] = 0
             logger.info(
-                f"Fold {fold}/{n_splits}: using initial lr={hp['lr_initial']}"
+                f"Fold {fold}/{n_splits}: using initial lr={hp['learning_rate']}"
             )
         else:
             logger.info(f"Fold {fold}/{n_splits}: resuming from checkpoint")
@@ -369,6 +457,7 @@ def cross_validate(
             f.write(f"Fold {fold} started")
 
         trainer.train(max_epochs=hp.get("max_epochs", 500))
+
 
         # =================================================================
         # CHECKPOINT SELECTION - GLOBAL BEST TRACKING
@@ -476,12 +565,17 @@ def cross_validate(
     if is_new_full_start:
         # Position final run in exponential LR schedule
         # Default: halfway between fold K and min_lr (virtual fold K+1)
-        num_intervals = n_splits - 1
-        decay_ratio = (hp["min_lr"] / hp["lr_initial"]) ** (
-            1.0 / num_intervals
+        effective_anchor = (
+            lr_anchor if lr_anchor is not None else hp["learning_rate"]
         )
+        if lr_anchor is None:
+            logger.warning(
+                "No LR anchor from fold 1; falling back to learning_rate "
+                f"={hp['learning_rate']:.6f} as anchor for final run."
+            )
+        num_intervals = n_splits - 1
         final_position = hp.get("final_fold_position", n_splits - 0.5)
-        new_lr = hp["lr_initial"] * (decay_ratio ** (final_position - 2))
+        new_lr = effective_anchor * (decay_ratio ** (final_position - 2))
         hp["lr_decay"] = hp["final_lr_decay"]
         hp["hold_steps"] = hp.get("fold_hold_steps", 0)
         logger.info(
@@ -611,10 +705,16 @@ def _main() -> None:
         n_splits=hp["k_folds"],
     )
 
+    early_stop_metric = hp.get("early_stop_metric", "val_loss")
     for result in fold_results:
-        logger.info(
-            f"Fold {result['fold']} - Best Validation Loss: {result['best_validation_loss']}"
-        )
+        fold_label = result["fold"]
+        bep   = result.get("fold_best_epoch") or result.get("best_epoch")
+        bval  = result.get("fold_best_value") or result.get("best_checkpoint_value")
+        bvl   = result.get("best_validation_loss")
+        ep_str  = f"best epoch={bep}, "   if bep  is not None else ""
+        val_str = f"{early_stop_metric}={bval:.4f}, " if bval is not None else ""
+        vl_str  = (f"best_val_loss=" + (f"{bvl:.4e}" if bvl < 1e-4 else f"{bvl:.6f}"))  if bvl is not None else ""
+        logger.info(f"Fold {fold_label}: {ep_str}{val_str}{vl_str}")
     elapsed = time.time() - start_time
     hours, remainder = divmod(elapsed, 3600)
     minutes, seconds = divmod(remainder, 60)
