@@ -2,13 +2,13 @@
 
 ### Training data paths
 train_path: "data/covers80/full.txt"
-test_path: "data/reels50easy_testset/full.txt"
+test_path: "data/covers80_testset/full.txt"
 # Note that val_path is ignored for train_prod because validation sets are generated per fold
 
 ### optional external test datasets used in the test phase of training epochs
 covers80:
-  query_path: "data/covers80/full.txt"
-  ref_path: "data/covers80/full.txt"
+  query_path: "data/covers80_testset/full.txt"
+  ref_path: "data/covers80_testset/full.txt"
   every_n_epoch_to_test: 1  # validate after every n epoch
   
 # Download the reels50easy dataset from https://www.irishtune.info/public/MLdata.htm
@@ -42,8 +42,8 @@ every_n_epoch_to_save: 1  # save model after every n epoch
 # bootstrap: Work-stratified bootstrap iterations for 95% confidence intervals
 # on mAP, MR1, and hit_rate. Runs automatically at each new-best checkpoint.
 # Reports how much your metrics might vary due to which tunes are in the testset.
-# 0 disables. 1000 is standard for publication. Cost is negligible (<1 sec).
-bootstrap: 1000
+# 0 disables. 1000 is standard for publication. Cost is negligible (seconds).
+bootstrap: 0 # 1000
 
 ### Dataset parameters
 data_type: "cqt"  # raw or cqt or mel
@@ -74,7 +74,7 @@ batch_size: 32  # 256. CoverHunter repo started with 16, but that is too small.
 learning_rate: 0.001
 adam_b1: 0.9
 adam_b2: 0.999
-lr_decay: 0.99  # CoverHunter used 0.9975 but that's for very large datasets
+lr_decay: 0.98  # CoverHunter used 0.9975 but that's for very large datasets
 min_lr: 0.00001 # Advice: Set to the lowest LR value where you see validation
                 # metrics and training losses stop improving
 warmup: False
@@ -102,41 +102,38 @@ hold_steps: 0
 #   will be evaluated and logged but never influence training decisions,
 #   preserving their validity as held-out benchmarks.
 #   You must also set map_stopping_testsets below.
-early_stop_metric: "val_loss"
+early_stop_metric: "mAP"
 early_stopping_patience: 3
-max_epochs: 500           # safety ceiling; early stopping normally terminates first
+max_epochs: 300           # safety ceiling; early stopping normally terminates first
 
 # map_stopping_testsets: List of testset names that drive stopping decisions.
 #   Only used when early_stop_metric: "mAP"
 #   Testsets not in this list are benchmark-only (logged but uncontaminated).
 #
-# map_stopping_testsets: ["yourInternalTestset"]
+map_stopping_testsets: ["covers80"]
 
 # map_smoothing_alpha: EMA weight for current mAP observation (0.0-1.0).
 #   Higher values = more responsive to recent changes, more noise sensitivity.
 #   Lower values = more stable, slower to detect genuine plateaus.
 #   Only used when early_stop_metric: "mAP"
 #
-# map_smoothing_alpha: 0.3
+map_smoothing_alpha: 0.3
 
 
 ### Training parameters only used by train_prod
 k_folds: 5                   # number of folds for cross-validation
-lr_initial: 0.0001           # starting learning rate for fold 2 (fold 1 uses learning_rate)
-                             # so that each fold's initial LR decays toward min_lr
 # fold_hold_steps: Used only for folds 2-K
 #   to help folds adapt after loading checkpoints from previous folds,
 #   where aggressive early decay can hurt convergence. 
 #   Early stopping for this fold will not start monitoring until after fold_hold_steps.
-fold_hold_steps: 2000
-fold_lr_decay: 0.9925        # learning rate decay for folds 2-K
-final_lr_decay: 0.9925       # learning rate decay for final full dataset training
+fold_hold_steps: 0
+fold_lr_decay: 0.98        # learning rate decay for folds 2-K
+final_lr_decay: 0.98       # learning rate decay for final full dataset training
 final_fold_position: 4.5       # position in exponential LR sequence 
                              # where 2 = fold 2 initial LR = lr_initial
                              # Suggested default: use k_folds - 0.5
                              # meaning halfway between the initial LR of fold K and min_lr
-final_early_stopping_patience: 10  # recommend longer patience for final full dataset training
-
+final_early_stopping_patience: 3  # recommend longer patience for final full dataset training
 
 
 ### Model parameters
