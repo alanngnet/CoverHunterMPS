@@ -122,6 +122,9 @@ map_smoothing_alpha: 0.3
 
 ### Training parameters only used by train_prod
 k_folds: 5                   # number of folds for cross-validation
+# lr_initial_fold2: 0.00015  # Optional: override auto-calibrated fold 2 starting LR.
+                          # Default: reads LR from fold 1's best checkpoint optimizer state.
+                          # Set this if auto-calibration undershoots or overshoots.
 # fold_hold_steps: Used only for folds 2-K
 #   to help folds adapt after loading checkpoints from previous folds,
 #   where aggressive early decay can hurt convergence. 

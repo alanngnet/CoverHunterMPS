@@ -245,14 +245,17 @@ def cross_validate(
     introduces unseen data to the model - and ensures every fold retains
     headroom to anneal toward min_lr during training.
 
-    Fold 2 auto-calibrates its starting LR from fold 1's best checkpoint epoch:
-    lr_fold2 = learning_rate * lr_decay^best_epoch. This anchors subsequent folds
-    at the empirically optimal LR from fold 1 rather than a manually guessed
-    lr_initial. hp["lr_initial"] serves as a fallback if global_best_epoch is
-    unavailable.
+    By default, fold 2 auto-calibrates its starting LR from fold 1's best 
+    checkpoint epoch:
+       lr_fold2 = learning_rate * lr_decay^best_epoch
+    This anchors subsequent folds at the empirically optimal LR from fold 1 
+    rather than a manually guessed lr_initial_fold2. 
+    
+    Or, you can manually set a hp["lr_initial_fold2"]. This also serves as a
+    fallback if (probably only by user error) global_best_epoch is unavailable.
 
-    Folds 3-K interpolate exponentially from this anchor toward
-    hp["min_lr"] (treated as virtual fold K+1).
+    Either way, the initial LR for folds 3-K descend exponentially from this
+    anchor toward hp["min_lr"] (treated as virtual fold K+1).
 
     The hold_steps period at fold 2 start allows productive basin exploration
     at the calibrated LR before fold_lr_decay descent begins.
@@ -400,25 +403,39 @@ def cross_validate(
         # LR before fold_lr_decay descent begins.
         # =================================================================
 
-        if fold == 2 and is_new_fold_start and global_best_epoch is not None:
-            # Read the LR directly from the optimizer state loaded from fold 1's
-            # best checkpoint — the empirical LR where peak performance was achieved.
-            # Store as lr_initial so folds 3-K interpolate from this calibrated anchor.
-            lr_fold2 = trainer.optimizer.param_groups[0]["lr"]
-            if lr_fold2 > hp["min_lr"]:
-                lr_anchor = lr_fold2
+        if fold == 2 and is_new_fold_start:
+            # User-supplied override takes priority over auto-calibration of LR.
+            manual_lr = hp.get("lr_initial_fold2")
+            if manual_lr is not None:
+                lr_anchor = float(manual_lr)
                 save_lr_anchor(
-                    lr_anchor_file, lr_anchor, fold=1, epoch=global_best_epoch
+                    lr_anchor_file, lr_anchor, fold=1, epoch=global_best_epoch or 0
                 )
                 logger.info(
-                    f"Auto-calibrated lr_anchor={lr_fold2:.6f} from "
-                    f"fold 1 best checkpoint (epoch {global_best_epoch})"
+                    f"lr_initial_fold2={lr_anchor:.6f} set manually; "
+                    f"using as fold 2 LR anchor (overrides auto-calibration)"
                 )
-            else:
-                logger.warning(
-                    f"Fold 1 best checkpoint LR={lr_fold2:.6f} <= min_lr "
-                    f"{hp['min_lr']:.6f}; folds 2-K will use uncalibrated fallback schedule"
-                )
+            elif global_best_epoch is not None:
+                # Default: read LR from fold 1's best checkpoint optimizer state —
+                # the empirical LR where peak performance was achieved.
+                # Folds 3-K descend from this anchor.
+                lr_fold2 = trainer.optimizer.param_groups[0]["lr"]
+                if lr_fold2 > hp["min_lr"]:
+                    lr_anchor = lr_fold2
+                    save_lr_anchor(
+                        lr_anchor_file, lr_anchor, fold=1, epoch=global_best_epoch
+                    )
+                    logger.info(
+                        f"Auto-calibrated lr_anchor={lr_fold2:.6f} from "
+                        f"fold 1 best checkpoint (epoch {global_best_epoch})"
+                    )
+                else:
+                    logger.warning(
+                        f"Fold 1 best checkpoint LR={lr_fold2:.6f} <= min_lr "
+                        f"{hp['min_lr']:.6f}; folds 2-K will use uncalibrated fallback schedule"
+                    )
+
+
 
         if fold > 1 and is_new_fold_start:
             # Treat min_lr as virtual "fold K+1" so fold K retains descent headroom
