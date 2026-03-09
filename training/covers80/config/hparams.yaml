@@ -58,11 +58,6 @@ early_stop_metric: "val_loss"
 #
 # map_stopping_testsets: ["reels50easy"]
 
-# map_stopping_patience: Epochs without smoothed mAP improvement before stopping.
-#   Only used when early_stop_metric: "mAP"
-#
-# map_stopping_patience: 5
-
 # map_smoothing_alpha: EMA weight for current mAP observation (0.0-1.0).
 #   Higher values = more responsive to recent changes, more noise sensitivity.
 #   Lower values = more stable, slower to detect genuine plateaus.

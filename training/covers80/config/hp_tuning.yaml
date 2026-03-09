@@ -17,9 +17,35 @@
 # specify here how the mAP metrics are identified in the TensorBoard logs
 test_name: "covers80"
 
-# these are optional settings
-max_epochs: 10 # if omitted, train_tune will default to 15
+# Early stopping mode for all experiments in this tuning run.
+# Options:
+#   "val_loss" (default): stop when validation focal loss plateaus.
+#                         early_stopping_patience (below) is required.
+#   "mAP": stop when smoothed mAP on map_stopping_testsets plateaus.
+#          map_stopping_patience is used instead of early_stopping_patience
+#          for the stopping decision AND for the slope window in the summary.
+#          early_stopping_patience is still accepted as a safety ceiling
+#          (defaults to 1000 if omitted in mAP mode).
+early_stop_metric: "val_loss"
+
+# Required when early_stop_metric: "mAP"
+# List testset names whose mAP drives stopping. Must match names defined
+# in hparams.yaml. Testsets defined in hparams.yaml but not listed here
+# are evaluated each epoch but never influence stopping decisions.
+# map_stopping_testsets: ["covers80"]
+
+# EMA smoothing weight for mAP-based stopping (0.0–1.0).
+# Higher = more responsive but noisier. Lower = more stable but slower to react.
+# Only used when early_stop_metric: "mAP". Default: 0.3
+# map_smoothing_alpha: 0.3
+
+# Patience for early stopping — applies to both val_loss and mAP modes.
+# In val_loss mode: epochs without validation loss improvement.
+# In mAP mode: epochs without smoothed mAP improvement.
+# Also used as the slope calculation window in the experiment summary output.
 early_stopping_patience: 3
+
+max_epochs: 10 # if omitted, train_tune will default to 15
 
 seeds: [123, 456, 789]
 
