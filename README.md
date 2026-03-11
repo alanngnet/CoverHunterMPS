@@ -140,7 +140,7 @@ After you use the tools.train script to confirm your data is usable with CoverHu
 
 Step 1: Study the explanations in the Training Hyperparameters section below to make some hypotheses about alternative hyperparameter values to try with your data. *Tip for deep learning newbies*: A good AI assistant can help greatly with hyperparameter tuning advice. Give it this project's files, detailed descriptions of your dataset, the hyperparameters you've tried and their results, and even perhaps the corresponding screenshots of your resulting Tensorboard validation loss and test set mAP metrics. Then ask it for advice on what to try next.
 
-Step 2: Add your hypotheses as specific hyperparameter values to try in the `hp_tuning.yaml` file in the model's training folder, following the comments and examples there. 
+Step 2: Add your hypotheses as specific hyperparameter values to try in the `hp_tuning.yaml` file in the model's training folder, following the comments and examples there. Set all other hyperparameters to empty ([] or {}) in `hp_tuning.yaml`) to avoid wasting compute.
 
 Step 3: Launch training with `model_dir` as the one required parameter:
 ```
@@ -171,6 +171,21 @@ While your mAP absolute value results are by far the most important metric to wa
 This script will not retain any model checkpoints from the training runs, but it does create separate log files for each run that you can monitor and study in TensorBoard.
 
 If you are running on a CUDA platform, the `make_deterministic()` function in tools.train_tune may have significant performance disadvantages for you. Consider whether you'd rather comment out that line and instead run enough different random seeds to compensate for non-deterministic training behavior so that you can reliably compare results between different hyperparameter settings.
+
+### Refinement Tuning from a Checkpoint
+By default, `train_tune.py` starts every experiment from scratch. If you have a foundation model you want to try teaching your own dataset, or you have your own trained model and want to explore whether further tuning of specific hyperparameters can squeeze out additional performance, you can instead seed every experiment from an existing checkpoint using the `foundation_checkpoint` hyperparameter `in hp_tuning.yaml`.
+
+The script will copy the specified checkpoint file into the temporary experiment directory before each run, so Trainer.load_model() resumes from it rather than initializing weights randomly.
+
+Adjusting your`learning_rate` is critical. Set to values much lower than for training from scratch, typically 10–20% of it. Jumping in with too high a rate will rapidly overwrite the features the model has already learned.
+
+`max_epochs` should be short. Since the model is already trained, it reaches diminishing returns much faster than a cold-start run. Values of 5–10 are usually sufficient to differentiate between hyperparameter candidates in refinement tuning.
+
+#### What to tune in refinement mode
+The hyperparameters most likely to yield benefit from a well-trained starting point are `spec_augmentations`, `lr_decays`, `losses`, `m_per_classes`, and `adam_betas`.
+
+#### What to avoid in refinement mode
+Do not tune `chunk_frames`, `num_blocks`, focal loss `output_dims`, or any other parameter that changes model architecture. These alter weight tensor dimensions, so loading the checkpoint will fail or produce nonsensical results, effectively restarting from scratch anyway.
 
 ## Evaluation
 
