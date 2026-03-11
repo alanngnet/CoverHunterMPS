@@ -17,6 +17,27 @@
 # specify here how the mAP metrics are identified in the TensorBoard logs
 test_name: "covers80"
 
+# If you want to tune for a refinement training scenario (as opposed to training 
+# a model from scratch), use this to to specity the path to the base checkpoint
+# to use as the starting point for every experiment
+# Set to null to train from scratch.
+foundation_checkpoint: null
+# Example for refinement training:
+# seed_checkpoint: /path/to/your/model_dir/checkpoints/g_00130000
+
+# Optional overrides for hparams.yaml values.
+# When present, these replace the corresponding hparams.yaml values for
+# every experiment in this tuning run. Omit or set to null to use the
+# hparams.yaml value unchanged. Particularly useful for refinement training
+# from a checkpoint where LR and schedule should differ from scratch training.
+hp_overrides:
+  learning_rate: null
+  hold_steps: null
+  lr_decay: null
+  map_smoothing_alpha: null
+  warmup: null
+  warmup_steps: null
+
 # Early stopping mode for all experiments in this tuning run.
 # Options:
 #   "val_loss" (default): stop when validation focal loss plateaus.

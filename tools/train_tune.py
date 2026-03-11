@@ -46,32 +46,41 @@ def make_deterministic(seed):
 def apply_early_stopping_config(hp, experiments):
     """
     Apply early stopping configuration from experiments to hp.
-    
+
     Supports both val_loss (default) and mAP-based early stopping.
     """
     hp["every_n_epoch_to_save"] = 100
     hp["max_epochs"] = experiments.get("max_epochs", 15)
-    
+
     # Early stopping mode
     early_stop_metric = experiments.get("early_stop_metric", "val_loss")
     hp["early_stop_metric"] = early_stop_metric
-    
+
     if early_stop_metric == "mAP":
         hp["map_stopping_testsets"] = experiments.get("map_stopping_testsets", [])
-        hp["map_stopping_patience"] = experiments.get("map_stopping_patience", 5)
         hp["map_smoothing_alpha"] = experiments.get("map_smoothing_alpha", 0.3)
-        # val_loss patience still needed as fallback
-        hp["early_stopping_patience"] = experiments.get("early_stopping_patience", 1000)
-    else:
-        hp["early_stopping_patience"] = experiments["early_stopping_patience"]
+    hp["early_stopping_patience"] = experiments["early_stopping_patience"]
+
+
+def apply_hp_overrides(hp, experiments):
+    """
+    Apply optional per-key overrides from hp_tuning.yaml onto hp.
+    Only keys explicitly set (non-null) in the hp_overrides block will
+    replace their counterparts loaded from hparams.yaml, so that
+    refinement-training runs can use a different LR schedule without
+    modifying hparams.yaml.
+    """
+    overrides = experiments.get("hp_overrides", {}) or {}
+    override_keys = ["learning_rate", "hold_steps", "lr_decay", "warmup", "warmup_steps"]
+    for key in override_keys:
+        val = overrides.get(key)
+        if val is not None:
+            hp[key] = val
 
 
 def get_slope_window(hp, experiments):
-    """Return appropriate slope window based on early stopping mode."""
-    if experiments.get("early_stop_metric") == "mAP":
-        return experiments.get("map_stopping_patience", 5)
+    """Return slope window for summary statistics, matching the patience used by Trainer."""
     return experiments["early_stopping_patience"]
-
 
 
 def run_experiment(
@@ -79,6 +88,7 @@ def run_experiment(
     checkpoint_dir,
     hp,
     seed,
+    foundation_checkpoint=None,
 ):
     hp["seed"] = seed
     make_deterministic(seed)
@@ -106,6 +116,11 @@ def run_experiment(
     os.makedirs(log_path, exist_ok=True)
     shutil.rmtree(checkpoint_dir)
     os.makedirs(checkpoint_dir, exist_ok=True)
+    if foundation_checkpoint is not None:
+        dest = os.path.join(checkpoint_dir, os.path.basename(foundation_checkpoint))
+        shutil.copy2(foundation_checkpoint, dest)
+        print(f"Seeding from checkpoint: {foundation_checkpoint}")
+
     # must clear temp embeddings otherwise they will be reused for testsset metrics
     directories = glob.glob(os.path.join(model_dir, "embed_*_*"))
     for directory in directories:
@@ -130,25 +145,33 @@ def run_experiment(
     # ensure log files are saved before retrieving metrics
     t.summary_writer.close()
 
+    bootstrap_results = getattr(t, "last_bootstrap_results", {})
     del t.model
     del t
     gc.collect()
     print(f"Completed experiment with seed {seed}")
     time.sleep(1)  # give OS time to save log file
-    return log_path
+    return log_path, bootstrap_results
 
 
-def get_final_metrics_from_logs(log_dir, test_name, slope_window=3):
+def get_final_metrics_from_logs(
+    log_dir, test_name, slope_window=3, benchmark_testsets=None
+):
     """
     Extract training metrics from TensorBoard logs.
 
-    Returns dict with:
-        - val_loss: final validation focal loss
         - val_loss_slope: slope over last slope_window epochs
-                          (negative = improving, ~0 = converged, positive = overfitting)
         - map: final mAP on test_name
         - map_slope: slope of mAP over last slope_window epochs
                      (positive = improving, ~0 = converged, negative = degrading)
+    Returns flat scalar dict with:
+        - val_loss, val_loss_slope: final validation focal loss and its trend
+            (slope: negative = improving, ~0 = converged, positive = overfitting)
+        - map, map_slope: final mAP on test_name and its trend
+            (slope: positive = improving, ~0 = converged, negative = degrading)
+        - bmap_{name}: final mAP for each benchmark testset (if benchmark_testsets provided)
+    All values are plain floats suitable for np.mean/np.std accumulation across seeds.
+    Bootstrap CI data is returned separately from run_experiment() to avoid TensorBoard writes.
     """
     event_file = max(
         glob.glob(os.path.join(log_dir, "events.out.tfevents.*")),
@@ -179,12 +202,19 @@ def get_final_metrics_from_logs(log_dir, test_name, slope_window=3):
         f"mAP={final_map:.4f} (slope={map_slope:+.4f})"
     )
 
-    return {
+    result = {
         "val_loss": val_loss,
         "val_loss_slope": val_loss_slope,
         "map": final_map,
         "map_slope": map_slope,
     }
+    for bname in benchmark_testsets or []:
+        try:
+            bseries = ea.Scalars(f"mAP/{bname}")
+            result[f"bmap_{bname}"] = bseries[-1].value
+        except KeyError:
+            pass  # testset not evaluated in this run (e.g. every_n_epoch_to_test skipped it)
+    return result
 
 
 if __name__ == "__main__":
@@ -199,6 +229,7 @@ if __name__ == "__main__":
     experiments = load_hparams(
         os.path.join(model_dir, "config/hp_tuning.yaml")
     )
+    foundation_checkpoint = experiments.get("foundation_checkpoint", None)
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
     test_name = experiments["test_name"]
     # ensure at least one seed
@@ -213,6 +244,7 @@ if __name__ == "__main__":
     learning_rates = experiments["learning_rates"]
     lr_decays = experiments["lr_decays"]
     adam_betas = experiments["adam_betas"]
+    benchmark_testsets = hp.get("benchmark_testsets", [])
 
     os.makedirs(checkpoint_dir, exist_ok=True)
     logger = create_logger()
@@ -247,8 +279,6 @@ if __name__ == "__main__":
     all_results = {}
 
     # chunk_frame experiments
-
-# chunk_frame experiments
     apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for chunk_frame in chunk_frames:
@@ -262,10 +292,23 @@ if __name__ == "__main__":
                     + "_".join([str(c) for c in chunk_frame])
                     + f"_mean_size{mean_size}"
                 )
-                log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-                metrics = get_final_metrics_from_logs(
-                    log_path, test_name, get_slope_window(hp, experiments)
+                log_path, bootstrap_results = run_experiment(
+                    hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
                 )
+                metrics = get_final_metrics_from_logs(
+                    log_path,
+                    test_name,
+                    get_slope_window(hp, experiments),
+                    benchmark_testsets=benchmark_testsets,
+                )
+                # Flatten bootstrap CIs into metrics for unified mean/std
+                # accumulation across seeds.
+                # Keyed as bci_{testset}_{ci_low|ci_high|std}
+                for ts_name, boot_ci in bootstrap_results.items():
+                    for ci_key in ("ci_low", "ci_high", "std"):
+                        val = boot_ci.get("mean_ap", {}).get(ci_key)
+                        if val is not None:
+                            metrics[f"bci_{ts_name}_{ci_key}"] = val
                 for key, value in metrics.items():
                     results[key].append(value)
             all_results[hp_summary] = {
@@ -278,16 +321,30 @@ if __name__ == "__main__":
 
     # m_per_class experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
+    apply_hp_overrides(hp, experiments)
     apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for m_per_class in m_per_classes:
         hp["m_per_class"] = m_per_class
         for seed in seeds:
             hp_summary = f"m_per_class{m_per_class}"
-            log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            metrics = get_final_metrics_from_logs(
-                log_path, test_name, get_slope_window(hp, experiments)
+            log_path, bootstrap_results = run_experiment(
+                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            metrics = get_final_metrics_from_logs(
+                log_path,
+                test_name,
+                get_slope_window(hp, experiments),
+                benchmark_testsets=benchmark_testsets,
+            )
+            # Flatten bootstrap CIs into metrics for unified mean/std
+            # accumulation across seeds.
+            # Keyed as bci_{testset}_{ci_low|ci_high|std}
+            for ts_name, boot_ci in bootstrap_results.items():
+                for ci_key in ("ci_low", "ci_high", "std"):
+                    val = boot_ci.get("mean_ap", {}).get(ci_key)
+                    if val is not None:
+                        metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
         all_results[hp_summary] = {
@@ -300,16 +357,30 @@ if __name__ == "__main__":
 
     # num_blocks experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
+    apply_hp_overrides(hp, experiments)
     apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for num_blocks in num_blockss:
         hp["encoder"]["num_blocks"] = num_blocks
         for seed in seeds:
             hp_summary = f"num_blocks{num_blocks}"
-            log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            metrics = get_final_metrics_from_logs(
-                log_path, test_name, get_slope_window(hp, experiments)
+            log_path, bootstrap_results = run_experiment(
+                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            metrics = get_final_metrics_from_logs(
+                log_path,
+                test_name,
+                get_slope_window(hp, experiments),
+                benchmark_testsets=benchmark_testsets,
+            )
+            # Flatten bootstrap CIs into metrics for unified mean/std
+            # accumulation across seeds.
+            # Keyed as bci_{testset}_{ci_low|ci_high|std}
+            for ts_name, boot_ci in bootstrap_results.items():
+                for ci_key in ("ci_low", "ci_high", "std"):
+                    val = boot_ci.get("mean_ap", {}).get(ci_key)
+                    if val is not None:
+                        metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
         all_results[hp_summary] = {
@@ -322,6 +393,7 @@ if __name__ == "__main__":
 
     # spec_aug experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
+    apply_hp_overrides(hp, experiments)
     apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for spec_augmentation in spec_augmentations:
@@ -340,10 +412,23 @@ if __name__ == "__main__":
                 + f"_roll_prob{roll_pitch_prob}_shift{roll_pitch_shift_num}"
                 + f"_{roll_pitch_method}"
             )
-            log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            metrics = get_final_metrics_from_logs(
-                log_path, test_name, get_slope_window(hp, experiments)
+            log_path, bootstrap_results = run_experiment(
+                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            metrics = get_final_metrics_from_logs(
+                log_path,
+                test_name,
+                get_slope_window(hp, experiments),
+                benchmark_testsets=benchmark_testsets,
+            )
+            # Flatten bootstrap CIs into metrics for unified mean/std
+            # accumulation across seeds.
+            # Keyed as bci_{testset}_{ci_low|ci_high|std}
+            for ts_name, boot_ci in bootstrap_results.items():
+                for ci_key in ("ci_low", "ci_high", "std"):
+                    val = boot_ci.get("mean_ap", {}).get(ci_key)
+                    if val is not None:
+                        metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
         all_results[hp_summary] = {
@@ -356,6 +441,7 @@ if __name__ == "__main__":
 
     # loss experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
+    apply_hp_overrides(hp, experiments)
     apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for loss in losses:
@@ -375,10 +461,23 @@ if __name__ == "__main__":
                 + f"TRIP_marg{triplet_margin}_wt{triplet_weight}_"
                 + f"CNTR_wt{center_weight}"
             )
-            log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            metrics = get_final_metrics_from_logs(
-                log_path, test_name, get_slope_window(hp, experiments)
+            log_path, bootstrap_results = run_experiment(
+                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            metrics = get_final_metrics_from_logs(
+                log_path,
+                test_name,
+                get_slope_window(hp, experiments),
+                benchmark_testsets=benchmark_testsets,
+            )
+            # Flatten bootstrap CIs into metrics for unified mean/std
+            # accumulation across seeds.
+            # Keyed as bci_{testset}_{ci_low|ci_high|std}
+            for ts_name, boot_ci in bootstrap_results.items():
+                for ci_key in ("ci_low", "ci_high", "std"):
+                    val = boot_ci.get("mean_ap", {}).get(ci_key)
+                    if val is not None:
+                        metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
         all_results[hp_summary] = {
@@ -391,16 +490,30 @@ if __name__ == "__main__":
 
     # learning_rate experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
+    apply_hp_overrides(hp, experiments)
     apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for learning_rate in learning_rates:
         hp["learning_rate"] = learning_rate
         for seed in seeds:
             hp_summary = f"lrate{learning_rate}"
-            log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            metrics = get_final_metrics_from_logs(
-                log_path, test_name, get_slope_window(hp, experiments)
+            log_path, bootstrap_results = run_experiment(
+                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            metrics = get_final_metrics_from_logs(
+                log_path,
+                test_name,
+                get_slope_window(hp, experiments),
+                benchmark_testsets=benchmark_testsets,
+            )
+            # Flatten bootstrap CIs into metrics for unified mean/std
+            # accumulation across seeds.
+            # Keyed as bci_{testset}_{ci_low|ci_high|std}
+            for ts_name, boot_ci in bootstrap_results.items():
+                for ci_key in ("ci_low", "ci_high", "std"):
+                    val = boot_ci.get("mean_ap", {}).get(ci_key)
+                    if val is not None:
+                        metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
         all_results[hp_summary] = {
@@ -413,16 +526,30 @@ if __name__ == "__main__":
 
     # lr_decay experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
+    apply_hp_overrides(hp, experiments)
     apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for lr_decay in lr_decays:
         hp["lr_decay"] = lr_decay
         for seed in seeds:
             hp_summary = f"lr_decay{lr_decay}"
-            log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            metrics = get_final_metrics_from_logs(
-                log_path, test_name, get_slope_window(hp, experiments)
+            log_path, bootstrap_results = run_experiment(
+                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            metrics = get_final_metrics_from_logs(
+                log_path,
+                test_name,
+                get_slope_window(hp, experiments),
+                benchmark_testsets=benchmark_testsets,
+            )
+            # Flatten bootstrap CIs into metrics for unified mean/std
+            # accumulation across seeds.
+            # Keyed as bci_{testset}_{ci_low|ci_high|std}
+            for ts_name, boot_ci in bootstrap_results.items():
+                for ci_key in ("ci_low", "ci_high", "std"):
+                    val = boot_ci.get("mean_ap", {}).get(ci_key)
+                    if val is not None:
+                        metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
         all_results[hp_summary] = {
@@ -435,6 +562,7 @@ if __name__ == "__main__":
 
     # AdamW betas experiments
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
+    apply_hp_overrides(hp, experiments)
     apply_early_stopping_config(hp, experiments)
     results = defaultdict(list)
     for adam_beta in adam_betas:
@@ -442,10 +570,23 @@ if __name__ == "__main__":
         hp["adam_b2"] = adam_beta[1]
         for seed in seeds:
             hp_summary = "adam_betas" + "_".join([str(c) for c in adam_beta])
-            log_path = run_experiment(hp_summary, checkpoint_dir, hp, seed)
-            metrics = get_final_metrics_from_logs(
-                log_path, test_name, get_slope_window(hp, experiments)
+            log_path, bootstrap_results = run_experiment(
+                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            metrics = get_final_metrics_from_logs(
+                log_path,
+                test_name,
+                get_slope_window(hp, experiments),
+                benchmark_testsets=benchmark_testsets,
+            )
+            # Flatten bootstrap CIs into metrics for unified mean/std
+            # accumulation across seeds.
+            # Keyed as bci_{testset}_{ci_low|ci_high|std}
+            for ts_name, boot_ci in bootstrap_results.items():
+                for ci_key in ("ci_low", "ci_high", "std"):
+                    val = boot_ci.get("mean_ap", {}).get(ci_key)
+                    if val is not None:
+                        metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
         all_results[hp_summary] = {
@@ -463,7 +604,26 @@ if __name__ == "__main__":
             f"  val_loss: {result['val_loss']['mean']:.4f}±{result['val_loss']['std']:.4f}  "
             f"(slope: {result['val_loss_slope']['mean']:+.4f})"
         )
-        print(
-            f"  mAP:      {result['map']['mean']:.4f}±{result['map']['std']:.4f}  "
+        # Primary testset mAP with optional bootstrap CI
+        map_line = (
+            f"  mAP [{test_name}]: {result['map']['mean']:.4f}±{result['map']['std']:.4f}  "
             f"(slope: {result['map_slope']['mean']:+.4f})"
         )
+        ci_lo = result.get(f"bci_{test_name}_ci_low", {}).get("mean")
+        ci_hi = result.get(f"bci_{test_name}_ci_high", {}).get("mean")
+        ci_sd = result.get(f"bci_{test_name}_std", {}).get("mean")
+        if ci_lo is not None:
+            map_line += f"  95%CI=[{ci_lo:.4f},{ci_hi:.4f}] ±{ci_sd:.4f}"
+        print(map_line)
+        # Benchmark testsets (sorted for stable output order)
+        for key in sorted(result.keys()):
+            if not key.startswith("bmap_"):
+                continue
+            bname = key[5:]
+            bmap_line = f"  mAP [{bname}]: {result[key]['mean']:.4f}±{result[key]['std']:.4f}  (benchmark)"
+            ci_lo = result.get(f"bci_{bname}_ci_low", {}).get("mean")
+            ci_hi = result.get(f"bci_{bname}_ci_high", {}).get("mean")
+            ci_sd = result.get(f"bci_{bname}_std", {}).get("mean")
+            if ci_lo is not None:
+                bmap_line += f"  95%CI=[{ci_lo:.4f},{ci_hi:.4f}] ±{ci_sd:.4f}"
+            print(bmap_line)

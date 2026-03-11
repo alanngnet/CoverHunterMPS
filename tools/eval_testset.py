@@ -112,7 +112,7 @@ def _main() -> None:
     else:
         test_only_labels = None
 
-    mean_ap, hit_rate, rank1 = eval_for_map_with_feat(
+    mean_ap, hit_rate, rank1, _ = eval_for_map_with_feat(
         hp,
         model,
         embed_dir,

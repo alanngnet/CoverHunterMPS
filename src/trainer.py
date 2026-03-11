@@ -27,7 +27,7 @@ torch.backends.cudnn.benchmark = True
 # Original CoverHunter only included a configuration for "covers80"
 # but also listed "shs_test", "dacaos" (presumably a typo for da-tacos), "hymf_20", "hymf_100"
 #
-# This legacy list of test sets retained as a reference comment from before
+# The following legacy list of test sets retained as a reference comment from before
 # immplementing _discover_testsets():
 # ALL_TEST_SETS = [
 #     "covers80",
@@ -156,7 +156,11 @@ class Trainer:
         # 0 disables. Typical value: 1000. Runs on each new-best checkpoint.
         self.bootstrap = hp.get("bootstrap", 0)
         self._last_bootstrap_epoch = None  # dedup guard
-        if self.bootstrap > 0: # check backwards compatibility
+        self.last_bootstrap_results = (
+            {}
+        )  # populated by _run_bootstrap_evaluation,
+        # read by train_tune
+        if self.bootstrap > 0:  # check backwards compatibility
             from src.map import bootstrap_metrics  # noqa: F401 — fail fast
 
         self.test_sets = _discover_testsets(hp)
@@ -574,7 +578,7 @@ class Trainer:
                 self.model_dir, f"embed_{self.epoch}_{save_name}"
             )
             query_in_ref_path = hp_test.get("query_in_ref_path", None)
-            mean_ap, hit_rate, _ = eval_for_map_with_feat(
+            mean_ap, hit_rate, _, _ = eval_for_map_with_feat(
                 self.hp,
                 self.model,
                 embed_dir,
@@ -612,12 +616,8 @@ class Trainer:
             self._check_map_early_stopping()
 
         # Bootstrap CIs on every new-best checkpoint (both val_loss and mAP modes)
-        if (
-            self.bootstrap > 0
-            and self.best_checkpoint_epoch == self.epoch
-        ):
+        if self.bootstrap > 0 and self.best_checkpoint_epoch == self.epoch:
             self._run_bootstrap_evaluation()
-
 
     def aggregate_stopping_map_scores(
         self, map_scores: dict[str, float]
@@ -874,7 +874,7 @@ class Trainer:
                     self.model_dir, f"embed_{self.epoch}_{save_name}"
                 )
                 query_in_ref_path = hp_test.get("query_in_ref_path", None)
-                mean_ap, hit_rate, _ = eval_for_map_with_feat(
+                mean_ap, hit_rate, _ , _= eval_for_map_with_feat(
                     self.hp,
                     self.model,
                     embed_dir,
@@ -898,12 +898,8 @@ class Trainer:
                 self.hp[testset_name]["every_n_epoch_to_test"] = orig_val
 
         # Bootstrap CIs if final epoch is the best checkpoint
-        if (
-            self.bootstrap > 0
-            and self.best_checkpoint_epoch == self.epoch
-        ):
+        if self.bootstrap > 0 and self.best_checkpoint_epoch == self.epoch:
             self._run_bootstrap_evaluation()
-
 
     def _run_bootstrap_evaluation(self):
         """Run work-stratified bootstrap confidence intervals on all testsets.
@@ -925,6 +921,7 @@ class Trainer:
         if self._last_bootstrap_epoch == self.epoch:
             return  # already ran for this epoch
         self._last_bootstrap_epoch = self.epoch
+        self.last_bootstrap_results = {}
 
         self.logger.info(
             "New best checkpoint at epoch %d — computing bootstrap CIs (B=%d)",
@@ -947,7 +944,7 @@ class Trainer:
                 continue
 
             query_in_ref_path = hp_test.get("query_in_ref_path", None)
-            eval_for_map_with_feat(
+            _, _, _, boot_ci = eval_for_map_with_feat(
                 self.hp,
                 self.model,
                 embed_dir,
@@ -960,6 +957,7 @@ class Trainer:
                 reuse_embeddings=True,
                 bootstrap=self.bootstrap,
             )
+            self.last_bootstrap_results[testset_name] = boot_ci
 
 
 def save_checkpoint(
