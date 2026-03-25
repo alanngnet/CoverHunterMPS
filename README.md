@@ -318,16 +318,16 @@ BEST EPOCHS BY AVERAGE mAP (all test sets)
 ### How to fork a production training run with a new fold
 
 Let's say you like your model's achievement at the checkpoint from epoch 20 in fold 1, but you've changed something like hyperparameters or code and want to restart a new fold 2 from that checkpoint:
-1. Delete or move the `do_` and `g_` checkpoint files numbered beyond 20 in the `prod_checkpoints` folder.
+1. Delete or move the `do_` and `g_` checkpoint files numbered beyond 20 in the `prod_checkpoints` folder. If you changed hyperparameters you should delete the `do_` file, too, to avoid the optimizer state "remembering" the influence of the old hyperparameters.
 2. Edit or confirm that `active_fold.txt` is present and contains "1" (the index for fold 1).
-3. Edit 'global_best.json' to match the best epoch and mAP or loss so far as of your epoch 20.
+3. Either remove or edit 'global_best.json', so that it's gone or matches the best epoch and mAP or loss so far as of your epoch 20.
 4. Delete the old `fold_2_started.txt` and any higher-numbered `fold_N_started.txt` files.
 5. Delete the old `full_dataset_started.txt` file if present.
 6. Restart training, and distinguish this fork by using a different `runid`, for example if you previously used 'prodv1.0' perhaps now:
 ```
 python -m tools.train_prod training/covers80/ --runid='prodv1.1'
 ```
-You can leave in place or delete the train and val data split files. As long as your random seed is the same, they will be regenerated identically.
+You can leave in place or delete the train and val data split files. As long as the data sets and random seed are the same, they will be regenerated identically.
 
 ## Generate Reference Embeddings
 
