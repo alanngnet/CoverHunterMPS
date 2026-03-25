@@ -143,6 +143,12 @@ losses:
         weight: 0
 losses: {}
 
+optimizers:
+  - prodigy
+optimizers: []
+
+# When using prodigy, learning_rates and lr_decays are ignored at runtime,
+# but keep them as single-element lists to avoid breaking the loop structure
 ## learning rate starting point
 learning_rates: [.0005, .002, .005, .01]
 learning_rates: []

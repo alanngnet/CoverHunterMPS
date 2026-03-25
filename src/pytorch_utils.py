@@ -40,7 +40,9 @@ def scan_and_load_checkpoint(cp_dir, prefix):
     if len(cp_list) == 0:
         return None
     model_path = sorted(cp_list)[-1]
-    checkpoint_dict = torch.load(model_path, map_location="cpu",weights_only=False)
+    checkpoint_dict = torch.load(
+        model_path, map_location="cpu", weights_only=False
+    )
     print(f"Loading {model_path}")
     return checkpoint_dict
 
@@ -59,7 +61,9 @@ def get_latest_model(hdf5_dir, prefix):
 def get_model_with_epoch(hdf5_dir, prefix, model_epoch):
     for name in os.listdir(hdf5_dir):
         if name.startswith(prefix):
-            local_epoch = int(name.replace("-", ".").replace("_", ".").split(".")[1])
+            local_epoch = int(
+                name.replace("-", ".").replace("_", ".").split(".")[1]
+            )
             if local_epoch == model_epoch:
                 return os.path.join(hdf5_dir, name)
     return None
@@ -67,7 +71,9 @@ def get_model_with_epoch(hdf5_dir, prefix, model_epoch):
 
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:
-        return param_group["lr"]
+        # Prodigy stores its adaptive step-size estimate in "d";
+        # "lr" is always 1.0 (a fixed scale factor, not the effective rate)
+        return param_group.get("d", param_group["lr"])
     return None
 
 

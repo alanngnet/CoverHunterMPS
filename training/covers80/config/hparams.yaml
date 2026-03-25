@@ -100,8 +100,14 @@ num_workers: 1
 num_gpus: 1
 batch_size: 32  # 256. CoverHunter repo started with 16, but that is too small.
 learning_rate: 0.001
-adam_b1: 0.8
-adam_b2: 0.99
+optimizer: adamw        # Options: adamw, prodigy
+adam_b1: 0.8            # only relevant when using adamw
+adam_b2: 0.99           # only relevant when using adamw
+prodigy_d_coef: 1.0     # Prodigy step-size sensitivity; only relevant when using prodigy
+                        # increase to 2.0 if converging too slowly
+                        # decrease to 0.5 if it explodes
+                        # prodigy is not useful for refinement training
+prodigy_safeguard_warmup: false
 lr_decay: 0.9  # CoverHunter used 0.9975 but that's for very large datasets
 min_lr: 0.0001
 warmup: False
@@ -115,6 +121,7 @@ warmup_steps: 20000
 #
 # Set to 0 to disable (immediate decay). Typical values: 2000-5000 steps.
 # Note: Mutually exclusive with warmup; if warmup=True, hold_steps is ignored.
+# Applies to both LR decay when using AdamW optimizer and to d growth when using Prodigy
 hold_steps: 0
 
 

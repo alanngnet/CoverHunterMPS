@@ -264,16 +264,38 @@ class Trainer:
     def configure_optimizer(self):
         """
         Configure the model optimizer.
+        Supports 'adamw' (default) and 'prodigy' via hp["optimizer"].
         """
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            self.hp["learning_rate"],
-            betas=[self.hp["adam_b1"], self.hp["adam_b2"]],
-        )
+        optimizer_name = self.hp.get("optimizer", "adamw").lower()
+        if optimizer_name == "prodigy":
+            from prodigyopt import Prodigy
+
+            self.optimizer = Prodigy(
+                self.model.parameters(),
+                lr=1.0,
+                betas=[self.hp["adam_b1"], self.hp["adam_b2"]],
+                weight_decay=self.hp.get("weight_decay", 0.01),
+                decouple=True,
+                d_coef=self.hp.get("prodigy_d_coef", 1.0),
+                safeguard_warmup=self.hp.get(
+                    "prodigy_safeguard_warmup", False
+                ),
+            )
+            self._using_prodigy = True
+        else:
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                self.hp["learning_rate"],
+                betas=[self.hp["adam_b1"], self.hp["adam_b2"]],
+            )
+            self._using_prodigy = False
 
     def configure_scheduler(self):
         """
         Configure the model scheduler.
+
+        When using Prodigy optimizer, scheduling is handled internally;
+        a no-op identity scheduler is installed to keep downstream code valid.
 
         Supports optional hold_steps parameter to delay the start of
         exponential decay, allowing the model to stabilize at the initial
@@ -291,6 +313,12 @@ class Trainer:
         is ignored.
 
         """
+        if getattr(self, "_using_prodigy", False):
+            self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+                self.optimizer, lr_lambda=lambda epoch: 1.0
+            )
+            self.scheduler.increment_step = lambda: None
+            return
         self.scheduler = UserDefineExponentialLR(
             self.optimizer,
             gamma=self.hp["lr_decay"],
@@ -336,6 +364,8 @@ class Trainer:
             new_lr = self.hp["learning_rate"]
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = new_lr
+            param_group["initial_lr"] = new_lr  # Reset base LR for scheduler
+
         # Recreate the scheduler with the new learning rate
         self.configure_scheduler()
 
@@ -874,7 +904,7 @@ class Trainer:
                     self.model_dir, f"embed_{self.epoch}_{save_name}"
                 )
                 query_in_ref_path = hp_test.get("query_in_ref_path", None)
-                mean_ap, hit_rate, _ , _= eval_for_map_with_feat(
+                mean_ap, hit_rate, _, _ = eval_for_map_with_feat(
                     self.hp,
                     self.model,
                     embed_dir,
@@ -1023,6 +1053,19 @@ def load_checkpoint(
     return step, epoch, early_stopping_state
 
 
+class TrainingDivergedException(Exception):
+    """Raised when training diverges due to NaN loss for consecutive steps.
+
+    Caught by train_tune.py to abort the current experiment cleanly and
+    continue to the next hyperparameter configuration. The threshold of
+    3 consecutive NaN steps avoids false positives from isolated bad batches
+    while responding quickly to genuine collapse (which is permanent once
+    the optimizer state is corrupted by NaN gradients).
+    """
+
+    pass
+
+
 def train_one_epoch(
     model,
     optimizer,
@@ -1038,6 +1081,7 @@ def train_one_epoch(
     init_step = step
     model.train()  # torch.nn.Module.train sets model in training mode
     idx_loader = list(range(len(train_loader_lst)))
+    _consecutive_nan_steps = 0
     for batch_lst in zip(*train_loader_lst):
         random.shuffle(idx_loader)
         for idx in idx_loader:
@@ -1051,6 +1095,23 @@ def train_one_epoch(
 
             optimizer.zero_grad()
             total_loss, losses = model.compute_loss(feat, label)
+
+            if torch.isnan(total_loss):
+                _consecutive_nan_steps += 1
+                if logger:
+                    logger.warning(
+                        "Steps:%d NaN total_loss (%d consecutive); "
+                        "possible gradient explosion",
+                        step,
+                        _consecutive_nan_steps,
+                    )
+                if _consecutive_nan_steps >= 3:
+                    raise TrainingDivergedException(
+                        f"Training diverged at step {step}: "
+                        f"{_consecutive_nan_steps} consecutive NaN losses"
+                    )
+            else:
+                _consecutive_nan_steps = 0
 
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

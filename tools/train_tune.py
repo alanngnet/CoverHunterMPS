@@ -16,7 +16,7 @@ import torch.multiprocessing as mp
 import numpy as np
 import random
 from collections import defaultdict
-from src.trainer import Trainer
+from src.trainer import Trainer, TrainingDivergedException
 from src.model import Model
 from src.utils import load_hparams, create_logger
 from tensorboard.backend.event_processing.event_accumulator import (
@@ -57,7 +57,9 @@ def apply_early_stopping_config(hp, experiments):
     hp["early_stop_metric"] = early_stop_metric
 
     if early_stop_metric == "mAP":
-        hp["map_stopping_testsets"] = experiments.get("map_stopping_testsets", [])
+        hp["map_stopping_testsets"] = experiments.get(
+            "map_stopping_testsets", []
+        )
         hp["map_smoothing_alpha"] = experiments.get("map_smoothing_alpha", 0.3)
     hp["early_stopping_patience"] = experiments["early_stopping_patience"]
 
@@ -65,17 +67,22 @@ def apply_early_stopping_config(hp, experiments):
 def apply_hp_overrides(hp, experiments):
     """
     Apply optional per-key overrides from hp_tuning.yaml onto hp.
-    Only keys explicitly set (non-null) in the hp_overrides block will
-    replace their counterparts loaded from hparams.yaml, so that
-    refinement-training runs can use a different LR schedule without
-    modifying hparams.yaml.
+    Any key in the hp_overrides block with a non-null value replaces
+    the corresponding value loaded from hparams.yaml. Keys set to null
+    are ignored, leaving the hparams.yaml value intact.
     """
+
+    def deep_merge(base, override):
+        for key, val in override.items():
+            if val is None:
+                continue
+            if isinstance(val, dict) and isinstance(base.get(key), dict):
+                deep_merge(base[key], val)
+            else:
+                base[key] = val
+
     overrides = experiments.get("hp_overrides", {}) or {}
-    override_keys = ["learning_rate", "hold_steps", "lr_decay", "warmup", "warmup_steps"]
-    for key in override_keys:
-        val = overrides.get(key)
-        if val is not None:
-            hp[key] = val
+    deep_merge(hp, overrides)
 
 
 def get_slope_window(hp, experiments):
@@ -117,7 +124,9 @@ def run_experiment(
     shutil.rmtree(checkpoint_dir)
     os.makedirs(checkpoint_dir, exist_ok=True)
     if foundation_checkpoint is not None:
-        dest = os.path.join(checkpoint_dir, os.path.basename(foundation_checkpoint))
+        dest = os.path.join(
+            checkpoint_dir, os.path.basename(foundation_checkpoint)
+        )
         shutil.copy2(foundation_checkpoint, dest)
         print(f"Seeding from checkpoint: {foundation_checkpoint}")
 
@@ -141,7 +150,12 @@ def run_experiment(
     t.configure_optimizer()
     t.load_model()
     t.configure_scheduler()
-    t.train(max_epochs=hp["max_epochs"])
+    diverged = False
+    try:
+        t.train(max_epochs=hp["max_epochs"])
+    except TrainingDivergedException as exc:
+        print(f"  *** DIVERGED: {exc} ***")
+        diverged = True
     # ensure log files are saved before retrieving metrics
     t.summary_writer.close()
 
@@ -149,9 +163,14 @@ def run_experiment(
     del t.model
     del t
     gc.collect()
-    print(f"Completed experiment with seed {seed}")
+    if diverged:
+        print(
+            f"  Experiment {hp_summary} seed {seed} aborted due to divergence"
+        )
+    else:
+        print(f"Completed experiment with seed {seed}")
     time.sleep(1)  # give OS time to save log file
-    return log_path, bootstrap_results
+    return log_path, bootstrap_results, diverged
 
 
 def get_final_metrics_from_logs(
@@ -197,17 +216,32 @@ def get_final_metrics_from_logs(
     final_map = map_series[-1].value
     map_slope = calc_slope(map_series, slope_window)
 
+    # Best (peak) values and their epochs
+    best_val_loss_entry = min(val_loss_series, key=lambda s: s.value)
+    best_val_loss = best_val_loss_entry.value
+    best_val_loss_epoch = best_val_loss_entry.step
+    best_map_entry = max(map_series, key=lambda s: s.value)
+    best_map = best_map_entry.value
+    best_map_epoch = best_map_entry.step
+
     print(
         f"val_loss={val_loss:.4f} (slope={val_loss_slope:+.4f}), "
-        f"mAP={final_map:.4f} (slope={map_slope:+.4f})"
+        f"best={best_val_loss:.4f}@epoch{best_val_loss_epoch}, "
+        f"mAP={final_map:.4f} (slope={map_slope:+.4f}), "
+        f"best={best_map:.4f}@epoch{best_map_epoch}"
     )
 
     result = {
         "val_loss": val_loss,
         "val_loss_slope": val_loss_slope,
+        "best_val_loss": best_val_loss,
+        "best_val_loss_epoch": best_val_loss_epoch,
         "map": final_map,
         "map_slope": map_slope,
+        "best_map": best_map,
+        "best_map_epoch": best_map_epoch,
     }
+
     for bname in benchmark_testsets or []:
         try:
             bseries = ea.Scalars(f"mAP/{bname}")
@@ -244,6 +278,7 @@ if __name__ == "__main__":
     learning_rates = experiments["learning_rates"]
     lr_decays = experiments["lr_decays"]
     adam_betas = experiments["adam_betas"]
+    optimizers = experiments.get("optimizers", ["adamw"])
     benchmark_testsets = hp.get("benchmark_testsets", [])
 
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -286,15 +321,22 @@ if __name__ == "__main__":
         for mean_size in mean_sizes:
             hp["mean_size"] = mean_size
             hp["chunk_s"] = chunk_frame[0] * mean_size / 25
+            n_diverged = 0
             for seed in seeds:
                 hp_summary = (
                     "chunk_frame"
                     + "_".join([str(c) for c in chunk_frame])
                     + f"_mean_size{mean_size}"
                 )
-                log_path, bootstrap_results = run_experiment(
+                log_path, bootstrap_results, diverged = run_experiment(
                     hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
                 )
+                if diverged:
+                    print(
+                        f"  *** {hp_summary} seed {seed}: DIVERGED — skipping seed ***"
+                    )
+                    n_diverged += 1
+                    continue
                 metrics = get_final_metrics_from_logs(
                     log_path,
                     test_name,
@@ -311,10 +353,19 @@ if __name__ == "__main__":
                             metrics[f"bci_{ts_name}_{ci_key}"] = val
                 for key, value in metrics.items():
                     results[key].append(value)
-            all_results[hp_summary] = {
-                key: {"mean": np.mean(vals), "std": np.std(vals)}
-                for key, vals in results.items()
-            }
+            if not results:
+                all_results[hp_summary] = {
+                    "__all_diverged__": True,
+                    "__n_seeds__": len(seeds),
+                }
+            else:
+                all_results[hp_summary] = {
+                    key: {"mean": np.mean(vals), "std": np.std(vals)}
+                    for key, vals in results.items()
+                }
+                if n_diverged:
+                    all_results[hp_summary]["__n_diverged__"] = n_diverged
+                    all_results[hp_summary]["__n_seeds__"] = len(seeds)
             results.clear()
             print(f"Results for {hp_summary}")
             pprint.pprint(all_results[hp_summary])
@@ -326,11 +377,18 @@ if __name__ == "__main__":
     results = defaultdict(list)
     for m_per_class in m_per_classes:
         hp["m_per_class"] = m_per_class
+        n_diverged = 0
         for seed in seeds:
             hp_summary = f"m_per_class{m_per_class}"
-            log_path, bootstrap_results = run_experiment(
+            log_path, bootstrap_results, diverged = run_experiment(
                 hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            if diverged:
+                print(
+                    f"  *** {hp_summary} seed {seed}: DIVERGED — skipping seed ***"
+                )
+                n_diverged += 1
+                continue
             metrics = get_final_metrics_from_logs(
                 log_path,
                 test_name,
@@ -347,10 +405,19 @@ if __name__ == "__main__":
                         metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
-        all_results[hp_summary] = {
-            key: {"mean": np.mean(vals), "std": np.std(vals)}
-            for key, vals in results.items()
-        }
+        if not results:
+            all_results[hp_summary] = {
+                "__all_diverged__": True,
+                "__n_seeds__": len(seeds),
+            }
+        else:
+            all_results[hp_summary] = {
+                key: {"mean": np.mean(vals), "std": np.std(vals)}
+                for key, vals in results.items()
+            }
+            if n_diverged:
+                all_results[hp_summary]["__n_diverged__"] = n_diverged
+                all_results[hp_summary]["__n_seeds__"] = len(seeds)
         results.clear()
         print(f"Results for {hp_summary}")
         pprint.pprint(all_results[hp_summary])
@@ -362,11 +429,18 @@ if __name__ == "__main__":
     results = defaultdict(list)
     for num_blocks in num_blockss:
         hp["encoder"]["num_blocks"] = num_blocks
+        n_diverged = 0
         for seed in seeds:
             hp_summary = f"num_blocks{num_blocks}"
-            log_path, bootstrap_results = run_experiment(
+            log_path, bootstrap_results, diverged = run_experiment(
                 hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            if diverged:
+                print(
+                    f"  *** {hp_summary} seed {seed}: DIVERGED — skipping seed ***"
+                )
+                n_diverged += 1
+                continue
             metrics = get_final_metrics_from_logs(
                 log_path,
                 test_name,
@@ -383,10 +457,19 @@ if __name__ == "__main__":
                         metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
-        all_results[hp_summary] = {
-            key: {"mean": np.mean(vals), "std": np.std(vals)}
-            for key, vals in results.items()
-        }
+        if not results:
+            all_results[hp_summary] = {
+                "__all_diverged__": True,
+                "__n_seeds__": len(seeds),
+            }
+        else:
+            all_results[hp_summary] = {
+                key: {"mean": np.mean(vals), "std": np.std(vals)}
+                for key, vals in results.items()
+            }
+            if n_diverged:
+                all_results[hp_summary]["__n_diverged__"] = n_diverged
+                all_results[hp_summary]["__n_seeds__"] = len(seeds)
         results.clear()
         print(f"Results for {hp_summary}")
         pprint.pprint(all_results[hp_summary])
@@ -404,7 +487,7 @@ if __name__ == "__main__":
         roll_pitch_prob = spec_augmentation["roll_pitch"]["prob"]
         roll_pitch_shift_num = spec_augmentation["roll_pitch"]["shift_num"]
         roll_pitch_method = spec_augmentation["roll_pitch"]["method"]
-
+        n_diverged = 0
         for seed in seeds:
             hp_summary = (
                 f"erase_prob{random_erase_prob}_num{random_erase_num}_size"
@@ -412,9 +495,15 @@ if __name__ == "__main__":
                 + f"_roll_prob{roll_pitch_prob}_shift{roll_pitch_shift_num}"
                 + f"_{roll_pitch_method}"
             )
-            log_path, bootstrap_results = run_experiment(
+            log_path, bootstrap_results, diverged = run_experiment(
                 hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            if diverged:
+                print(
+                    f"  *** {hp_summary} seed {seed}: DIVERGED — skipping seed ***"
+                )
+                n_diverged += 1
+                continue
             metrics = get_final_metrics_from_logs(
                 log_path,
                 test_name,
@@ -431,10 +520,19 @@ if __name__ == "__main__":
                         metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
-        all_results[hp_summary] = {
-            key: {"mean": np.mean(vals), "std": np.std(vals)}
-            for key, vals in results.items()
-        }
+        if not results:
+            all_results[hp_summary] = {
+                "__all_diverged__": True,
+                "__n_seeds__": len(seeds),
+            }
+        else:
+            all_results[hp_summary] = {
+                key: {"mean": np.mean(vals), "std": np.std(vals)}
+                for key, vals in results.items()
+            }
+            if n_diverged:
+                all_results[hp_summary]["__n_diverged__"] = n_diverged
+                all_results[hp_summary]["__n_seeds__"] = len(seeds)
         results.clear()
         print(f"Results for {hp_summary}")
         pprint.pprint(all_results[hp_summary])
@@ -454,16 +552,22 @@ if __name__ == "__main__":
         triplet_weight = triplet["weight"]
         hp["center"] = center = loss["center"]
         center_weight = center["weight"]
-
+        n_diverged = 0
         for seed in seeds:
             hp_summary = (
                 f"FOC_dims{foc_dims}_wt{foc_weight}_gamma{foc_gamma}_"
                 + f"TRIP_marg{triplet_margin}_wt{triplet_weight}_"
                 + f"CNTR_wt{center_weight}"
             )
-            log_path, bootstrap_results = run_experiment(
+            log_path, bootstrap_results, diverged = run_experiment(
                 hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            if diverged:
+                print(
+                    f"  *** {hp_summary} seed {seed}: DIVERGED — skipping seed ***"
+                )
+                n_diverged += 1
+                continue
             metrics = get_final_metrics_from_logs(
                 log_path,
                 test_name,
@@ -480,10 +584,19 @@ if __name__ == "__main__":
                         metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
-        all_results[hp_summary] = {
-            key: {"mean": np.mean(vals), "std": np.std(vals)}
-            for key, vals in results.items()
-        }
+        if not results:
+            all_results[hp_summary] = {
+                "__all_diverged__": True,
+                "__n_seeds__": len(seeds),
+            }
+        else:
+            all_results[hp_summary] = {
+                key: {"mean": np.mean(vals), "std": np.std(vals)}
+                for key, vals in results.items()
+            }
+            if n_diverged:
+                all_results[hp_summary]["__n_diverged__"] = n_diverged
+                all_results[hp_summary]["__n_seeds__"] = len(seeds)
         results.clear()
         print(f"Results for {hp_summary}")
         pprint.pprint(all_results[hp_summary])
@@ -495,11 +608,18 @@ if __name__ == "__main__":
     results = defaultdict(list)
     for learning_rate in learning_rates:
         hp["learning_rate"] = learning_rate
+        n_diverged = 0
         for seed in seeds:
             hp_summary = f"lrate{learning_rate}"
-            log_path, bootstrap_results = run_experiment(
+            log_path, bootstrap_results, diverged = run_experiment(
                 hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            if diverged:
+                print(
+                    f"  *** {hp_summary} seed {seed}: DIVERGED — skipping seed ***"
+                )
+                n_diverged += 1
+                continue
             metrics = get_final_metrics_from_logs(
                 log_path,
                 test_name,
@@ -516,10 +636,19 @@ if __name__ == "__main__":
                         metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
-        all_results[hp_summary] = {
-            key: {"mean": np.mean(vals), "std": np.std(vals)}
-            for key, vals in results.items()
-        }
+        if not results:
+            all_results[hp_summary] = {
+                "__all_diverged__": True,
+                "__n_seeds__": len(seeds),
+            }
+        else:
+            all_results[hp_summary] = {
+                key: {"mean": np.mean(vals), "std": np.std(vals)}
+                for key, vals in results.items()
+            }
+            if n_diverged:
+                all_results[hp_summary]["__n_diverged__"] = n_diverged
+                all_results[hp_summary]["__n_seeds__"] = len(seeds)
         results.clear()
         print(f"Results for {hp_summary}")
         pprint.pprint(all_results[hp_summary])
@@ -531,11 +660,18 @@ if __name__ == "__main__":
     results = defaultdict(list)
     for lr_decay in lr_decays:
         hp["lr_decay"] = lr_decay
+        n_diverged = 0
         for seed in seeds:
             hp_summary = f"lr_decay{lr_decay}"
-            log_path, bootstrap_results = run_experiment(
+            log_path, bootstrap_results, diverged = run_experiment(
                 hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            if diverged:
+                print(
+                    f"  *** {hp_summary} seed {seed}: DIVERGED — skipping seed ***"
+                )
+                n_diverged += 1
+                continue
             metrics = get_final_metrics_from_logs(
                 log_path,
                 test_name,
@@ -552,10 +688,20 @@ if __name__ == "__main__":
                         metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
-        all_results[hp_summary] = {
-            key: {"mean": np.mean(vals), "std": np.std(vals)}
-            for key, vals in results.items()
-        }
+        if not results:
+            all_results[hp_summary] = {
+                "__all_diverged__": True,
+                "__n_seeds__": len(seeds),
+            }
+        else:
+            all_results[hp_summary] = {
+                key: {"mean": np.mean(vals), "std": np.std(vals)}
+                for key, vals in results.items()
+            }
+            if n_diverged:
+                all_results[hp_summary]["__n_diverged__"] = n_diverged
+                all_results[hp_summary]["__n_seeds__"] = len(seeds)
+
         results.clear()
         print(f"Results for {hp_summary}")
         pprint.pprint(all_results[hp_summary])
@@ -568,11 +714,18 @@ if __name__ == "__main__":
     for adam_beta in adam_betas:
         hp["adam_b1"] = adam_beta[0]
         hp["adam_b2"] = adam_beta[1]
+        n_diverged = 0
         for seed in seeds:
             hp_summary = "adam_betas" + "_".join([str(c) for c in adam_beta])
-            log_path, bootstrap_results = run_experiment(
+            log_path, bootstrap_results, diverged = run_experiment(
                 hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
             )
+            if diverged:
+                print(
+                    f"  *** {hp_summary} seed {seed}: DIVERGED — skipping seed ***"
+                )
+                n_diverged += 1
+                continue
             metrics = get_final_metrics_from_logs(
                 log_path,
                 test_name,
@@ -589,10 +742,68 @@ if __name__ == "__main__":
                         metrics[f"bci_{ts_name}_{ci_key}"] = val
             for key, value in metrics.items():
                 results[key].append(value)
-        all_results[hp_summary] = {
-            key: {"mean": np.mean(vals), "std": np.std(vals)}
-            for key, vals in results.items()
-        }
+        if not results:
+            all_results[hp_summary] = {
+                "__all_diverged__": True,
+                "__n_seeds__": len(seeds),
+            }
+        else:
+            all_results[hp_summary] = {
+                key: {"mean": np.mean(vals), "std": np.std(vals)}
+                for key, vals in results.items()
+            }
+            if n_diverged:
+                all_results[hp_summary]["__n_diverged__"] = n_diverged
+                all_results[hp_summary]["__n_seeds__"] = len(seeds)
+        results.clear()
+        print(f"Results for {hp_summary}")
+        pprint.pprint(all_results[hp_summary])
+
+    # optimizer experiments
+    hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
+    apply_hp_overrides(hp, experiments)
+    apply_early_stopping_config(hp, experiments)
+    results = defaultdict(list)
+    for optimizer_name in optimizers:
+        hp["optimizer"] = optimizer_name
+        n_diverged = 0
+        for seed in seeds:
+            hp_summary = f"optimizer_{optimizer_name}"
+            log_path, bootstrap_results, diverged = run_experiment(
+                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
+            )
+            if diverged:
+                print(
+                    f"  *** {hp_summary} seed {seed}: DIVERGED — skipping seed ***"
+                )
+                n_diverged += 1
+                continue
+            metrics = get_final_metrics_from_logs(
+                log_path,
+                test_name,
+                get_slope_window(hp, experiments),
+                benchmark_testsets=benchmark_testsets,
+            )
+            for ts_name, boot_ci in bootstrap_results.items():
+                for ci_key in ("ci_low", "ci_high", "std"):
+                    val = boot_ci.get("mean_ap", {}).get(ci_key)
+                    if val is not None:
+                        metrics[f"bci_{ts_name}_{ci_key}"] = val
+            for key, value in metrics.items():
+                results[key].append(value)
+        if not results:
+            all_results[hp_summary] = {
+                "__all_diverged__": True,
+                "__n_seeds__": len(seeds),
+            }
+        else:
+            all_results[hp_summary] = {
+                key: {"mean": np.mean(vals), "std": np.std(vals)}
+                for key, vals in results.items()
+            }
+            if n_diverged:
+                all_results[hp_summary]["__n_diverged__"] = n_diverged
+                all_results[hp_summary]["__n_seeds__"] = len(seeds)
         results.clear()
         print(f"Results for {hp_summary}")
         pprint.pprint(all_results[hp_summary])
@@ -600,15 +811,29 @@ if __name__ == "__main__":
     print("\nSummary of Experiments:")
     for hp_summary, result in all_results.items():
         print(f"\nExperiment: {hp_summary}")
+        if result.get("__all_diverged__"):
+            print(
+                f"  *** ALL {result['__n_seeds__']} SEEDS DIVERGED "
+                f"(NaN loss / gradient explosion) — no metrics available ***"
+            )
+            continue
+        if "__n_diverged__" in result:
+            n_div = result["__n_diverged__"]
+            n_tot = result["__n_seeds__"]
+            print(
+                f"  WARNING: {n_div}/{n_tot} seeds diverged — "
+                f"statistics computed from {n_tot - n_div} seeds only"
+            )
         print(
             f"  val_loss: {result['val_loss']['mean']:.4f}±{result['val_loss']['std']:.4f}  "
-            f"(slope: {result['val_loss_slope']['mean']:+.4f})"
         )
         # Primary testset mAP with optional bootstrap CI
         map_line = (
             f"  mAP [{test_name}]: {result['map']['mean']:.4f}±{result['map']['std']:.4f}  "
-            f"(slope: {result['map_slope']['mean']:+.4f})"
+            f"(slope: {result['map_slope']['mean']:+.4f})  "
+            f"(best: {result['best_map']['mean']:.4f} @epoch {result['best_map_epoch']['mean']:.1f})"
         )
+
         ci_lo = result.get(f"bci_{test_name}_ci_low", {}).get("mean")
         ci_hi = result.get(f"bci_{test_name}_ci_high", {}).get("mean")
         ci_sd = result.get(f"bci_{test_name}_std", {}).get("mean")
