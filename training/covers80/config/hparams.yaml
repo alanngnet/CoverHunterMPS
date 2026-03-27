@@ -116,6 +116,11 @@ warmup_steps: 20000
 # before exponential decay begins. Creates a "plateau" period for model
 # stabilization.
 #
+# Important difference in this project's steps-epochs relationship: since 
+# tools.extract_csi_features adds precomputed speed variants to every real
+# data sample, there will be a lot more steps per epoch than you'd otherwise expect.
+# With the default settings, that means 5 training samples per real-world sample.
+#
 # Useful when resuming from a checkpoint, or to allow more exploration
 # at the starting LR before decay.
 #

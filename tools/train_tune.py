@@ -96,6 +96,7 @@ def run_experiment(
     hp,
     seed,
     foundation_checkpoint=None,
+    restore_optimizer_state=False,
 ):
     hp["seed"] = seed
     make_deterministic(seed)
@@ -123,12 +124,35 @@ def run_experiment(
     os.makedirs(log_path, exist_ok=True)
     shutil.rmtree(checkpoint_dir)
     os.makedirs(checkpoint_dir, exist_ok=True)
+
     if foundation_checkpoint is not None:
         dest = os.path.join(
             checkpoint_dir, os.path.basename(foundation_checkpoint)
         )
         shutil.copy2(foundation_checkpoint, dest)
-        print(f"Seeding from checkpoint: {foundation_checkpoint}")
+        if restore_optimizer_state:
+            g_basename = os.path.basename(foundation_checkpoint)
+            do_basename = g_basename.replace("g_", "do_", 1)
+            do_source = os.path.join(
+                os.path.dirname(foundation_checkpoint), do_basename
+            )
+            if os.path.exists(do_source):
+                shutil.copy2(
+                    do_source,
+                    os.path.join(checkpoint_dir, do_basename),
+                )
+                print(
+                    f"Seeding from checkpoint: {foundation_checkpoint} (with optimizer state)"
+                )
+            else:
+                print(
+                    f"WARNING: restore_optimizer_state is true but {do_source} "
+                    f"not found. Optimizer will start cold."
+                )
+        else:
+            print(
+                f"Seeding from checkpoint: {foundation_checkpoint} (weights only)"
+            )
 
     # must clear temp embeddings otherwise they will be reused for testsset metrics
     directories = glob.glob(os.path.join(model_dir, "embed_*_*"))
@@ -149,6 +173,23 @@ def run_experiment(
 
     t.configure_optimizer()
     t.load_model()
+    if restore_optimizer_state and foundation_checkpoint is not None:
+        # Warm Adam moments were restored from the do_ file, but the
+        # checkpoint's epoch/step counters and early stopping state must
+        # be reset so the experiment gets its full max_epochs budget and
+        # fresh stopping patience.
+        t.step = 1
+        t.epoch = -1
+        t.reset_early_stopping_state()
+        t._pending_scheduler_step_count = 0
+        # Override the checkpoint's saved LR with the experiment's desired LR
+        # so that the sweep variable or hp_overrides value takes effect, not
+        # the LR the foundation checkpoint happened to stop at.
+        for pg in t.optimizer.param_groups:
+            pg["lr"] = hp["learning_rate"]
+            pg["initial_lr"] = hp["learning_rate"]
+    t.configure_scheduler()
+
     t.configure_scheduler()
     diverged = False
     try:
@@ -264,6 +305,7 @@ if __name__ == "__main__":
         os.path.join(model_dir, "config/hp_tuning.yaml")
     )
     foundation_checkpoint = experiments.get("foundation_checkpoint", None)
+    restore_optimizer_state = experiments.get("restore_optimizer_state", False)
     hp = load_hparams(os.path.join(model_dir, "config/hparams.yaml"))
     test_name = experiments["test_name"]
     # ensure at least one seed
@@ -329,7 +371,12 @@ if __name__ == "__main__":
                     + f"_mean_size{mean_size}"
                 )
                 log_path, bootstrap_results, diverged = run_experiment(
-                    hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
+                    hp_summary,
+                    checkpoint_dir,
+                    hp,
+                    seed,
+                    foundation_checkpoint,
+                    restore_optimizer_state,
                 )
                 if diverged:
                     print(
@@ -381,7 +428,12 @@ if __name__ == "__main__":
         for seed in seeds:
             hp_summary = f"m_per_class{m_per_class}"
             log_path, bootstrap_results, diverged = run_experiment(
-                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
+                hp_summary,
+                checkpoint_dir,
+                hp,
+                seed,
+                foundation_checkpoint,
+                restore_optimizer_state,
             )
             if diverged:
                 print(
@@ -433,7 +485,12 @@ if __name__ == "__main__":
         for seed in seeds:
             hp_summary = f"num_blocks{num_blocks}"
             log_path, bootstrap_results, diverged = run_experiment(
-                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
+                hp_summary,
+                checkpoint_dir,
+                hp,
+                seed,
+                foundation_checkpoint,
+                restore_optimizer_state,
             )
             if diverged:
                 print(
@@ -496,7 +553,12 @@ if __name__ == "__main__":
                 + f"_{roll_pitch_method}"
             )
             log_path, bootstrap_results, diverged = run_experiment(
-                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
+                hp_summary,
+                checkpoint_dir,
+                hp,
+                seed,
+                foundation_checkpoint,
+                restore_optimizer_state,
             )
             if diverged:
                 print(
@@ -560,7 +622,12 @@ if __name__ == "__main__":
                 + f"CNTR_wt{center_weight}"
             )
             log_path, bootstrap_results, diverged = run_experiment(
-                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
+                hp_summary,
+                checkpoint_dir,
+                hp,
+                seed,
+                foundation_checkpoint,
+                restore_optimizer_state,
             )
             if diverged:
                 print(
@@ -612,7 +679,12 @@ if __name__ == "__main__":
         for seed in seeds:
             hp_summary = f"lrate{learning_rate}"
             log_path, bootstrap_results, diverged = run_experiment(
-                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
+                hp_summary,
+                checkpoint_dir,
+                hp,
+                seed,
+                foundation_checkpoint,
+                restore_optimizer_state,
             )
             if diverged:
                 print(
@@ -664,7 +736,12 @@ if __name__ == "__main__":
         for seed in seeds:
             hp_summary = f"lr_decay{lr_decay}"
             log_path, bootstrap_results, diverged = run_experiment(
-                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
+                hp_summary,
+                checkpoint_dir,
+                hp,
+                seed,
+                foundation_checkpoint,
+                restore_optimizer_state,
             )
             if diverged:
                 print(
@@ -718,7 +795,12 @@ if __name__ == "__main__":
         for seed in seeds:
             hp_summary = "adam_betas" + "_".join([str(c) for c in adam_beta])
             log_path, bootstrap_results, diverged = run_experiment(
-                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
+                hp_summary,
+                checkpoint_dir,
+                hp,
+                seed,
+                foundation_checkpoint,
+                restore_optimizer_state,
             )
             if diverged:
                 print(
@@ -770,7 +852,12 @@ if __name__ == "__main__":
         for seed in seeds:
             hp_summary = f"optimizer_{optimizer_name}"
             log_path, bootstrap_results, diverged = run_experiment(
-                hp_summary, checkpoint_dir, hp, seed, foundation_checkpoint
+                hp_summary,
+                checkpoint_dir,
+                hp,
+                seed,
+                foundation_checkpoint,
+                restore_optimizer_state,
             )
             if diverged:
                 print(

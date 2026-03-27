@@ -23,7 +23,27 @@ test_name: "covers80"
 # Set to null to train from scratch.
 foundation_checkpoint: null
 # Example for refinement training:
-# seed_checkpoint: /path/to/your/model_dir/checkpoints/g_00130000
+# foundation_checkpoint: /path/to/your/model_dir/checkpoints/g_00130000
+
+# You also need to decide whether to also restore the optimizer state 
+# (Adam moment estimates) from the foundation checkpoint's matching do_ file.
+#
+# true:  Copies both g_ and do_ files. Adam's running mean/variance estimates
+#        are warm from the foundation training, so the effective step size is
+#        calibrated to the loss landscape. The experiment's learning_rate
+#        (from hp_overrides or sweep variable) still takes effect — only the
+#        moment estimates are inherited, not the checkpoint's LR.
+#        Recommended when comparing experiments against a train_prod baseline,
+#        or when the foundation checkpoint was produced by a long training run
+#        whose optimizer state reflects the geometry of the loss surface.
+#
+# false: Copies only the g_ file (model weights). Adam starts cold with
+#        zeroed moment estimates. This amplifies effective step size in early
+#        epochs (sqrt(v_hat) is tiny), producing aggressive early peaks that
+#        may not reflect steady-state behavior. Use this when the foundation
+#        model was trained with a different optimizer or when you intentionally
+#        want a fresh optimization trajectory.
+restore_optimizer_state: true
 
 # Optional overrides for hparams.yaml values.
 # When present, these replace the corresponding hparams.yaml values for

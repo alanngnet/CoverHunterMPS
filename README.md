@@ -173,18 +173,34 @@ This script will not retain any model checkpoints from the training runs, but it
 If you are running on a CUDA platform, the `make_deterministic()` function in tools.train_tune may have significant performance disadvantages for you. Consider whether you'd rather comment out that line and instead run enough different random seeds to compensate for non-deterministic training behavior so that you can reliably compare results between different hyperparameter settings.
 
 ### Refinement Tuning from a Checkpoint
-By default, `train_tune.py` starts every experiment from scratch. If you have a foundation model you want to try teaching your own dataset, or you have your own trained model and want to explore whether further tuning of specific hyperparameters can squeeze out additional performance, you can instead seed every experiment from an existing checkpoint using the `foundation_checkpoint` hyperparameter `in hp_tuning.yaml`.
+By default, `train_tune.py` starts every experiment from scratch. If you have a foundation model you want to try teaching your own dataset, or you have your own trained model and want to explore whether further tuning of specific hyperparameters can squeeze out additional performance, you can instead seed every experiment from an existing checkpoint using the `foundation_checkpoint` parameter in `hp_tuning.yaml`.
 
-The script will copy the specified checkpoint file into the temporary experiment directory before each run, so Trainer.load_model() resumes from it rather than initializing weights randomly.
+#### Optimizer state: `restore_optimizer_state`
 
-Adjusting your`learning_rate` is critical. Set to values much lower than for training from scratch, typically 10–20% of it. Jumping in with too high a rate will rapidly overwrite the features the model has already learned.
+A checkpoint consists of two files: `g_NNNNNNNN` (model weights) and `do_NNNNNNNN` (optimizer state — Adam moment estimates, step count, and learning rate). By default, only model weights are copied. Set `restore_optimizer_state: true` to also copy the `do_` file.
+
+**Why this matters:** AdamW maintains per-parameter running estimates of gradient mean (first moment) and variance (second moment). When these start at zero ("cold"), the denominator √v̂ is tiny in early steps, which amplifies the effective step size far beyond the nominal learning rate. This produces artificially aggressive early peaks and collapse patterns that do not reflect how the model would behave in a production training run (e.g., `train_prod.py`) where optimizer state is warm from prior folds.
+
+**When to use `true`:** The foundation checkpoint was trained under the same (or very similar) loss configuration — same loss weights, margins, m_per_class, and focal loss gamma — and you are tuning schedule parameters (LR, lr_decay, hold_steps), augmentation, or other hyperparameters that don't change the shape of the loss surface. This is the right choice when you want experiments to be directly comparable to a `train_prod` baseline. The experiment's `learning_rate` (from `hp_overrides` or the `learning_rates` sweep variable) always takes effect — only the moment estimates are inherited from the checkpoint, not its saved LR.
+
+**When to use `false`:** The foundation checkpoint was trained under a substantially different loss configuration than the experiments will use — different loss weights, triplet margins, m_per_class batching, or focal loss gamma. Adam's per-parameter moment estimates encode the gradient geometry of the old loss surface, and with β₂=0.999 they have an effective half-life of ~700 steps, so stale estimates persist long enough to actively miscalibrate step sizes for the new configuration. Also use `false` when the foundation model was trained with a different optimizer (e.g., Prodigy). A `hold_steps` period is recommended with cold starts to let the moments warm up before LR decay begins.
+
+If `restore_optimizer_state` is `true` but the matching `do_` file is not found alongside the `g_` file, a warning is printed and the experiment proceeds with a cold optimizer.
+
+#### Learning rate
+
+Adjusting your `learning_rate` is critical. Set to values much lower than for training from scratch, typically 10–20% of it. Jumping in with too high a rate will rapidly overwrite the features the model has already learned.
+
+#### Epoch budget
 
 `max_epochs` should be short. Since the model is already trained, it reaches diminishing returns much faster than a cold-start run. Values of 5–10 are usually sufficient to differentiate between hyperparameter candidates in refinement tuning.
 
 #### What to tune in refinement mode
+
 The hyperparameters most likely to yield benefit from a well-trained starting point are `spec_augmentations`, `lr_decays`, `losses`, `m_per_classes`, and `adam_betas`.
 
 #### What to avoid in refinement mode
+
 Do not tune `chunk_frames`, `num_blocks`, focal loss `output_dims`, or any other parameter that changes model architecture. These alter weight tensor dimensions, so loading the checkpoint will fail or produce nonsensical results, effectively restarting from scratch anyway.
 
 ## Evaluation
