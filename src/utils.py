@@ -7,6 +7,8 @@
 import json
 import logging
 import os
+import hashlib
+import pickle
 # import shutil
 
 # import numpy as np
@@ -314,6 +316,131 @@ def get_hparams_as_string(hparams):
 # def save_wav(wav, path, sr, k=None) -> None:
 #     norm_wav = wav * 32767 / max(0.01, np.max(np.abs(wav))) * k if k else wav * 32767
 #     wavfile.write(path, sr, norm_wav.astype(np.int16))
+
+
+def compute_model_fingerprint(state_dict) -> str:
+    """Deterministic 16-hex-char fingerprint of a model's weights.
+
+    Hashes tensor data in sorted-key order so the same trained weights
+    always yield the same fingerprint, regardless of save timestamp,
+    PyTorch version, or filesystem metadata. Used to verify that
+    reference embeddings, centroids, and the inference-time model are
+    mutually consistent.
+
+    Args:
+        state_dict: a PyTorch state_dict (OrderedDict of name -> tensor),
+            typically obtained from model.state_dict() or torch.load(...).
+
+    Returns:
+        16-character lowercase hex string.
+    """
+    h = hashlib.sha256()
+    for key in sorted(state_dict.keys()):
+        tensor = state_dict[key]
+        # Include the parameter name so renaming a layer changes the hash.
+        h.update(key.encode("utf-8"))
+        # Include shape and dtype so a same-name parameter with different
+        # geometry doesn't collide.
+        h.update(str(tuple(tensor.shape)).encode("utf-8"))
+        h.update(str(tensor.dtype).encode("utf-8"))
+        # Move to CPU and contiguous before extracting bytes; detach in
+        # case any param has grad attached.
+        h.update(tensor.detach().cpu().contiguous().numpy().tobytes())
+    return h.hexdigest()[:16]
+
+
+def load_reference_embeddings(path: str) -> dict:
+    """Load a reference_embeddings.pkl file with format validation.
+
+    Returns the record as written by tools.make_embeds, with these keys:
+        embeddings       dict perf_id -> unit-normalized np.ndarray
+        norms            dict perf_id -> float (pre-normalization norm)
+        normalized       bool (always True for v2 format)
+        embed_dim        int
+        model_fingerprint  str
+        calibration      dict per src.calibration schema, or None if --raw
+
+    Raises a clear error if the file is in legacy flat-dict format,
+    directing the user to regenerate.
+    """
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+
+    if not isinstance(data, dict) or "embeddings" not in data:
+        raise ValueError(
+            f"{path} appears to be in the legacy flat-dict format "
+            f"(perf_id -> embedding). Regenerate with the current "
+            f"tools.make_embeds; the storage schema has changed to "
+            f"include normalization, calibration, and a model "
+            f"fingerprint."
+        )
+
+    required = {
+        "embeddings",
+        "norms",
+        "normalized",
+        "embed_dim",
+        "model_fingerprint",
+        "calibration",
+    }
+    missing = required - set(data.keys())
+    if missing:
+        raise ValueError(
+            f"{path} is missing required keys: {sorted(missing)}. "
+            f"Regenerate with the current tools.make_embeds."
+        )
+
+    return data
+
+
+def load_centroids(path: str) -> dict:
+    """Load a work_centroids.pkl file with format validation.
+
+    Returns the record as written by tools.compute_centroids, with these
+    keys:
+        centroids          dict work_id -> unit-normalized np.ndarray
+        radii              dict work_id -> float (angular spread)
+        coherence          dict work_id -> float (pre-renorm magnitude
+                           of the work-mean; rough within-work agreement)
+        work_to_perfs      dict work_id -> list of perf_ids
+        normalized         bool (always True)
+        embed_dim          int
+        model_fingerprint  str
+        calibration        dict per src.calibration schema, or None
+
+    Raises a clear error if the file is in legacy format, directing the
+    user to regenerate.
+    """
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+
+    # Legacy format detection: has centroids+radii+work_to_perfs but
+    # lacks any of the v2-only keys.
+    if not isinstance(data, dict) or "centroids" not in data:
+        raise ValueError(
+            f"{path} is not a recognizable centroids file. "
+            f"Regenerate with the current tools.compute_centroids."
+        )
+
+    required = {
+        "centroids",
+        "radii",
+        "coherence",
+        "work_to_perfs",
+        "normalized",
+        "embed_dim",
+        "model_fingerprint",
+        "calibration",
+    }
+    missing = required - set(data.keys())
+    if missing:
+        raise ValueError(
+            f"{path} is missing required keys: {sorted(missing)}. "
+            f"This may be a legacy v1 centroids file. Regenerate with "
+            f"the current tools.compute_centroids."
+        )
+
+    return data
 
 
 if __name__ == "__main__":
