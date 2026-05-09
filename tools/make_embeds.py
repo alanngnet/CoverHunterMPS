@@ -17,6 +17,10 @@ Tune calibration sample size (default 50000):
     python -m tools.make_embeds data/covers80 training/covers80 \\
         --calibration-pairs 100000
 
+Skip recordings whose CQT .npy files are absent (prints a report first):
+    python -m tools.make_embeds data/covers80 training/covers80 \\
+        --skip-missing
+
 Parameters
 ----------
 data_path : string
@@ -43,6 +47,12 @@ model_path : string
 --calibration-pairs : int
     Number of cross-work pairs to sample for calibration. Default 50000.
     Ignored if --raw is set.
+
+--skip-missing : flag
+    Before building the dataset, check each entry's CQT .npy path for
+    existence. Missing files are listed and then skipped; processing
+    continues with whatever is present. Without this flag, missing files
+    cause a crash inside the DataLoader.
 
 Output
 ------
@@ -116,7 +126,7 @@ def generate_embeddings(model, data_loader, device):
     return embeddings
 
 
-def main(data_path, model_path, raw, calibration_pairs):
+def main(data_path, model_path, raw, calibration_pairs, skip_missing):
     # Load hyperparameters
     model_hp = load_hparams(os.path.join(model_path, "config/hparams.yaml"))
 
@@ -145,6 +155,19 @@ def main(data_path, model_path, raw, calibration_pairs):
         if not re.match(r"sp_[0-9.]+-.+", line_to_dict(line)["perf"])
     ]
     print(f"Loaded {len(lines)} CQT arrays to compute their embeddings.")
+
+    if skip_missing:
+        present, missing = [], []
+        for line in lines:
+            feat_path = line_to_dict(line)["feat"]
+            (present if os.path.exists(feat_path) else missing).append(line)
+        if missing:
+            print(f"WARNING: {len(missing)} CQT file(s) not found and will be skipped:")
+            for line in missing:
+                d = line_to_dict(line)
+                print(f"  {d['perf']}: {d['feat']}")
+        lines = present
+        print(f"Proceeding with {len(lines)} recordings.")
 
     infer_frame = model_hp["chunk_frame"][0] * model_hp["mean_size"]
     dataset = AudioFeatDataset(
@@ -256,6 +279,12 @@ if __name__ == "__main__":
         help="Number of cross-work pairs to sample for calibration "
         "(default: 50000). Ignored if --raw.",
     )
+    parser.add_argument(
+        "--skip-missing",
+        action="store_true",
+        help="Check each CQT .npy path before building the dataset; report "
+        "missing files and proceed without them instead of crashing.",
+    )
     args = parser.parse_args()
 
     main(
@@ -263,4 +292,5 @@ if __name__ == "__main__":
         args.model_path,
         raw=args.raw,
         calibration_pairs=args.calibration_pairs,
+        skip_missing=args.skip_missing,
     )
