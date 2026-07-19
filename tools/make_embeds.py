@@ -80,8 +80,8 @@ Schema (--raw):
     }
 
 
-Complete rewrite 2026-05-03 by alanngnet with Claude Opus 4.7, switching to 
-normalized embeddings as default, with calibration data supporting both 
+Complete rewrite 2026-05-03 by alanngnet with Claude Opus 4.7, switching to
+normalized embeddings as default, with calibration data supporting both
 end-user CSI/VI applications and research-grade data science work.
 
 Originally created on Sat Jul 27 10:54:22 2024, generating raw embeddings only.
@@ -169,6 +169,19 @@ def main(data_path, model_path, raw, calibration_pairs, skip_missing):
         lines = present
         print(f"Proceeding with {len(lines)} recordings.")
 
+    # Map perf_id -> work_id from the explicit "work" field in full.txt.
+    # Do NOT derive the work from the perf_id string (e.g. p.split(".")[0]):
+    # that convention only holds for the Irish production datasets and
+    # silently makes every performance its own work on datasets whose
+    # perf_ids have no work prefix (SHS100K, meertens, estfolk, ...),
+    # which would contaminate the calibration negative distribution with
+    # genuine cover pairs. The "work" field is authoritative for all
+    # datasets produced by tools.extract_csi_features.
+    perf_to_work = {
+        d["perf"]: d["work"]
+        for d in (line_to_dict(line) for line in lines)
+    }
+
     infer_frame = model_hp["chunk_frame"][0] * model_hp["mean_size"]
     dataset = AudioFeatDataset(
         model_hp,
@@ -214,11 +227,10 @@ def main(data_path, model_path, raw, calibration_pairs, skip_missing):
         }
         normalized = True
 
-        # Build work_to_perfs from perf_id naming convention
-        # (perf_id format: "{work_id}.{performance_suffix}")
+        # Group perfs by their authoritative work_id (see perf_to_work above).
         work_to_perfs = {}
         for p in embeddings_out:
-            work_id = p.split(".")[0]
+            work_id = perf_to_work[p]
             work_to_perfs.setdefault(work_id, []).append(p)
 
         print(
@@ -261,7 +273,7 @@ if __name__ == "__main__":
         description="Generate reference embeddings for production use."
     )
     parser.add_argument(
-        "data_path", help="Path to the data folder containing dataset.txt"
+        "data_path", help="Path to the data folder containing full.txt"
     )
     parser.add_argument(
         "model_path", help="Path to the folder containing the trained model"

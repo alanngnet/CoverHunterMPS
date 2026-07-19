@@ -42,6 +42,7 @@ Calibration record schema (dict, pickle-friendly):
     }
 
 @author: alanngnet with Claude Opus 4.7 2026-05-03
+Revised with Claude Opus 4.8 2026-07-17
 
 """
 
@@ -79,7 +80,7 @@ def compute_calibration(
 
     Assumes embeddings are already L2-normalized (unit vectors). Cosine
     distance is computed as 1 - dot.
-    
+
     Args:
         embeddings: dict perf_id -> unit-normalized embedding vector.
         work_to_perfs: dict work_id -> list of perf_ids belonging to that
@@ -89,8 +90,9 @@ def compute_calibration(
             if the ECDF tails matter.
         n_quantiles: resolution of the stored empirical CDF. 1001 gives
             0.1% resolution, ~4 KB at float32.
-        seed: RNG seed for reproducibility. Also impacts model fingerprinting
-            strategy in make_embeds, so don't change this within a model's lifetime.
+        seed: RNG seed for reproducibility. Fixing it keeps the sampled
+            negative distribution stable across runs on the same reference
+            set.
 
     Returns:
         Calibration record dict per the schema in the module docstring.
@@ -164,6 +166,10 @@ def compute_calibration(
     else:
         # Large dataset: rejection sampling, with a hard iteration cap
         # to fail loud rather than spin if cross-work yield is pathological.
+        # Accumulate dot products in float64 for ECDF accuracy at the
+        # tails; this runs once per make_embeds and is not on any hot
+        # path. The clip guards against floating-point overshoot of
+        # [-1, 1] for near-identical or near-antipodal unit vectors.
         distances = np.empty(n_pairs, dtype=np.float32)
         filled = 0
         max_iterations = 100
@@ -194,31 +200,6 @@ def compute_calibration(
             d = (1.0 - dots).astype(np.float32)
             distances[filled : filled + len(ii)] = d
             filled += len(ii)
-
-    distances = np.empty(n_pairs, dtype=np.float32)
-    filled = 0
-    # Empirically generous oversample factor; loop will re-draw if short.
-    while filled < n_pairs:
-        need = n_pairs - filled
-        draw = max(need * 2, 1024)
-        i = rng.integers(0, n_perfs, size=draw)
-        j = rng.integers(0, n_perfs, size=draw)
-        # Reject self-pairs and same-work pairs
-        keep_mask = (i != j) & (works_arr[i] != works_arr[j])
-        ii = i[keep_mask][:need]
-        jj = j[keep_mask][:need]
-        if len(ii) == 0:
-            continue
-        # Cosine distance for unit vectors: 1 - dot product
-        # Accumulate in float64 for ECDF accuracy at the tails;
-        # this runs once per make_embeds and is not on any hot path.
-        # Clip guards against floating-point overshoot of [-1, 1] for
-        # near-identical or near-antipodal unit vectors.
-        dots = np.einsum("nd,nd->n", matrix[ii], matrix[jj], dtype=np.float64)
-        dots = np.clip(dots, -1.0, 1.0)
-        d = (1.0 - dots).astype(np.float32)
-        distances[filled : filled + len(ii)] = d
-        filled += len(ii)
 
     mu = float(distances.mean())
     sigma = float(distances.std(ddof=1))
