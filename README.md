@@ -79,7 +79,7 @@ To use the Covers80 example you prepared above, next run this from the project r
 python -m tools.extract_csi_features data/covers80/
 ```
 
-This script accepts whatever audio file formats are supported by `torchaudio.load` (assuming you are using GPU) or `librosa.load` (assuming you are using CPU). It does force 16kHz sampling rates as a baked-in assumption throughout this project.
+This script accepts whatever audio file formats are supported by `librosa.load`. It does force mono (1-channel audio) and 16kHz sampling rates as a baked-in assumption throughout this project.
 
 ## Training
 

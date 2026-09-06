@@ -10,5 +10,4 @@ scipy
 tabulate
 tensorboard
 torch
-torchaudio
 tqdm
