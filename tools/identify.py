@@ -79,7 +79,7 @@ from src.utils import (
 def _make_feat(wav_path, fmin, max_freq, n_bins, bins_per_octave, device):
     """
     Borrowed CQT logic from tools.extract_csi_features
-        _extract_cqt_worker_torchaudio()
+        _extract_cqt_worker_gpu()
     This function should stay synchronized with that one.
     """
     import librosa

@@ -23,7 +23,6 @@ import librosa
 from nnAudio.features.cqt import CQT, CQT2010v2
 import numpy as np
 import torch
-import torchaudio
 
 from src.cqt import PyCqt
 from src.dataset import SignalAug
@@ -160,7 +159,7 @@ def _speed_aug_parallel(init_path, aug_speed_lst, aug_path, sp_dir) -> None:
 
 # instead of original serial function,
 # leverage multiple CPU cores to run multiple CQT extractions in parallel
-def _extract_cqt_worker_librosa(args):
+def _extract_cqt_worker_cpu(args):
     """worker function for _extract_cqt_parallel"""
     line, cqt_dir, fmin, max_freq, bins_per_octave = args
     wav_path = line["wav"]
@@ -186,7 +185,7 @@ def _extract_cqt_worker_librosa(args):
     return line
 
 
-def _extract_cqt_worker_torchaudio(args):
+def _extract_cqt_worker_gpu(args):
     line, cqt_dir, fmin, max_freq, n_bins, bins_per_octave, device = args
     wav_path = line["wav"]
     feat_path = os.path.join(cqt_dir, "{}.cqt.npy".format(line["perf"]))
@@ -197,13 +196,12 @@ def _extract_cqt_worker_torchaudio(args):
     elif device == "cuda":
         transform = CQT2010v2
 
-    signal, sr = torchaudio.load(wav_path)
-    # Force mono by averaging channels if stereo
-    if signal.shape[0] > 1:
-        signal = torch.mean(signal, dim=0, keepdim=True)
-    # Resample if needed, for example, in case input is .mp3
-    if sr != 16000:
-        signal = torchaudio.functional.resample(signal, sr, 16000)
+    # Load audio using librosa, matching tools.identify._make_feat().
+    # librosa handles mono downmix and resampling to 16kHz internally,
+    # and has no dependency on torchaudio/torchcodec/FFmpeg.
+    signal, sr = librosa.load(wav_path, sr=16000, mono=True)
+    signal = torch.from_numpy(signal).float().unsqueeze(0)
+
     signal = signal.to(device)
     signal = (
         signal
@@ -247,9 +245,9 @@ def worker(args):
     line, cqt_dir, fmin, max_freq, n_bins, bins_per_octave, device = args
     try:
         if device in ("mps", "cuda"):
-            return _extract_cqt_worker_torchaudio(args)
+            return _extract_cqt_worker_gpu(args)
 
-        return _extract_cqt_worker_librosa(
+        return _extract_cqt_worker_cpu(
             line, cqt_dir, fmin, max_freq, bins_per_octave
         )
     except Exception as e:
